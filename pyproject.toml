@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cmd-config"
+version = "0.0.1"
+requires-python = ">=3.14"
+dependencies = [
+    "docopt-ng>=0.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "mypy",
+    "pyflakes",
+]
+
+[tool.black]
+line-length = 140
+target-version = ["py314"]
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+python_version = "3.14"
+files = ["src/cmd_config"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cmd_config"]

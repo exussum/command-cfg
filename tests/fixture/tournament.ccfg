@@ -1,0 +1,11 @@
+setting surface grass
+setting best_of 5
+
+round quarterfinal Alcaraz  win
+round quarterfinal Djokovic win
+round semifinal    Alcaraz  win
+
+game define Final 14:00 3:10
+game append .     Alcaraz  3
+game append Final Djokovic 1
+game define Exhibition 18:00 1:00
