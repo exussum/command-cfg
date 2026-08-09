@@ -80,7 +80,7 @@ def test_parse(name, expected):
     "name,message",
     [
         ("unknown_command", "line 2: unknown command 'rank'"),
-        ("usage_mismatch", "line 1: 'seed Alcaraz' does not match 'seed <player> <rank>'"),
+        ("usage_mismatch", "line 1: 'seed Alcaraz' does not match 'Usage: seed <player> <rank>'"),
         ("ditto_no_previous", "line 1: '.' has nothing above it to repeat"),
         ("ditto_command", "line 2: unknown command '.'"),
         ("no_serializer", "line 1: no serializer for 'umpire'"),
