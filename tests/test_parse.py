@@ -1,8 +1,10 @@
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
 
+import cmd_config
 from cmd_config import ConfigError, parse
 
 GRAMMAR = """
@@ -87,3 +89,10 @@ def test_parse(name, expected):
 def test_parse_errors(name, message):
     with pytest.raises(ConfigError, match="^" + re.escape(message) + "$"):
         _parse(name)
+
+
+def test_docstring_example_is_a_working_script():
+    marker = "from collections import namedtuple"
+    _, found, script = cmd_config.__doc__.partition(marker)
+    assert found
+    exec(textwrap.dedent(marker + script), {})

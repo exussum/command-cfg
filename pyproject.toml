@@ -34,9 +34,8 @@ disallow_incomplete_defs = true
 warn_unused_ignores = true
 
 [tool.pytest.ini_options]
-addopts = "--doctest-modules"
 pythonpath = ["src"]
-testpaths = ["tests", "src"]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cmd_config"]
