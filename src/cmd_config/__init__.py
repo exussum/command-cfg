@@ -12,61 +12,107 @@ class ConfigError(Exception):
     pass
 
 
-def parse(text: str, grammar: str, serializers: Mapping[str, Callable[[SimpleNamespace, dict[str, Any]], None]]) -> dict[str, Any]:
+def parse(
+    text: str,
+    grammar: str,
+    serializers: Mapping[str, Callable[..., Any]] | None = None,
+    *,
+    scalars: Sequence[str] = (),
+    grouped: Sequence[str] = (),
+    cast: Callable[[str, Any], Any] = lambda key, value: value,
+) -> dict[str, Any]:
+    """Parse config text line by line, dispatching each command to a serializer.
+
+    Every object in the result comes from `serializers`. A command listed in `grouped`
+    maps to a row factory, called once per line with the line's fields as kwargs; its
+    rows are collected in dicts of lists keyed by the line's first field. A command in
+    `scalars` also maps to a factory, called once after parsing with the accumulated
+    key/value pairs as kwargs — one object per command, duplicate keys are an error.
+    Any other command maps to a function `(values, objects) -> None` that writes
+    wherever it wants in the `objects` dict parse returns.
+
+    >>> from collections import namedtuple
+    >>> Settings = namedtuple("Settings", "surface")
+    >>> Round = namedtuple("Round", "player")
+    >>> Match = namedtuple("Match", "winner sets")
+    >>> def match(values, objects):
+    ...     objects.setdefault("matches", []).append(Match(values.winner, int(values.sets)))
+    >>> parse('''
+    ... setting surface grass
+    ... round quarterfinal Alcaraz
+    ... round quarterfinal Djokovic
+    ... match Alcaraz 3
+    ... ''', '''
+    ... setting <key> <value>
+    ... round <name> <player>
+    ... match <winner> <sets>
+    ... ''', serializers={"setting": Settings, "round": Round, "match": match}, scalars=("setting",), grouped=("round",))
+    {'setting': Settings(surface='grass'), 'round': {'quarterfinal': [Round(player='Alcaraz'), Round(player='Djokovic')]}, 'matches': [Match(winner='Alcaraz', sets=3)]}
+    """
+    given = dict(serializers or {})
+    combined = {**given, **_serializers(grammar, scalars, grouped, cast, given)}
     usages = _to_usages(grammar)
     objects: dict[str, Any] = {}
     previous: list[str] = []
     for number, raw in enumerate(text.splitlines(), 1):
         try:
             if parsed := _parse_line(raw, usages, previous):
-                if (serializer := serializers.get(parsed.command)) is None:
+                if (serializer := combined.get(parsed.command)) is None:
                     raise ValueError(f"no serializer for {parsed.command!r}")
                 serializer(parsed.values, objects)
                 previous = parsed.tokens
         except ValueError as exc:
             raise ConfigError(f"line {number}: {exc}") from None
+    for command in scalars:
+        try:
+            objects[command] = given[command](**objects.get(command, {}))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{command}: {exc}") from None
     return objects
 
 
-def serializers(
+def _serializers(
     grammar: str,
-    scalars: Sequence[str] = (),
-    grouped: Sequence[str] = (),
-    cast: Callable[[str, Any], Any] = lambda key, value: value,
+    scalars: Sequence[str],
+    grouped: Sequence[str],
+    cast: Callable[[str, Any], Any],
+    factories: Mapping[str, Callable[..., Any]],
 ) -> dict[str, Callable[[SimpleNamespace, dict[str, Any]], None]]:
+    fields = _grammar_fields(grammar, (*scalars, *grouped))
     if both := set(scalars) & set(grouped):
         raise ValueError(f"commands in both scalars and grouped: {sorted(both)}")
-    fields = _grammar_fields(grammar, (*scalars, *grouped))
     for command in scalars:
         if len(fields[command]) != 2:
             raise ValueError(f"scalar command {command!r} must have exactly 2 fields, has {fields[command]}")
     for command in grouped:
         if len(fields[command]) < 2:
             raise ValueError(f"grouped command {command!r} must have at least 2 fields, has {fields[command]}")
+    if missing := {*scalars, *grouped} - factories.keys():
+        raise ValueError(f"commands need a factory in serializers: {sorted(missing)}")
     group_params: dict[tuple[str, str], dict[str, Any]] = {}
 
     def scalar(command: str, values: SimpleNamespace, objects: dict[str, Any]) -> None:
         key, value = fields[command]
-        objects[cast(key, getattr(values, key))] = cast(value, getattr(values, value))
+        pairs = objects.setdefault(command, {})
+        if (key_value := cast(key, getattr(values, key))) in pairs:
+            raise ValueError(f"duplicate {command} {key_value!r}")
+        pairs[key_value] = cast(value, getattr(values, value))
 
     def group(command: str, values: SimpleNamespace, objects: dict[str, Any]) -> None:
         vals = {key: cast(key, value) for key, value in vars(values).items()}
         define, append = vals.pop("define", False), vals.pop("append", False)
         name = vals.pop(fields[command][0])
         present = {key: value for key, value in vals.items() if value is not None}
-        groups = objects.setdefault(command, SimpleNamespace())
+        groups = objects.setdefault(command, {})
         if define:
             group_params[(command, name)] = present
-            setattr(groups, name, [])
+            groups[name] = []
         elif append:
-            if (rows := getattr(groups, name, None)) is None:
+            if (rows := groups.get(name)) is None:
                 raise ValueError(f"unknown {command} group {name!r}: define it first")
-            rows.append(SimpleNamespace(**group_params[(command, name)], **present))
+            rows.append(factories[command](**group_params[(command, name)], **present))
         else:
-            if (rows := getattr(groups, name, None)) is None:
-                rows = []
-                setattr(groups, name, rows)
-            rows.append(SimpleNamespace(**present))
+            groups.setdefault(name, []).append(factories[command](**present))
 
     return {**{c: partial(scalar, c) for c in scalars}, **{c: partial(group, c) for c in grouped}}
 
