@@ -16,16 +16,13 @@ FIXTURE = Path(__file__).parent / "fixture"
 
 
 def _parse(name):
-    rows = []
-
-    def record(values):
+    def record(values, objects):
         rank = getattr(values, "rank", None)
         if rank is not None and not rank.isdigit():
             raise ValueError(f"not a number: {rank!r}")
-        rows.append(vars(values))
+        objects.setdefault("rows", []).append(vars(values))
 
-    parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": record, "match": record})
-    return rows
+    return parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": record, "match": record})["rows"]
 
 
 @pytest.mark.parametrize(

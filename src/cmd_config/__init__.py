@@ -12,55 +12,70 @@ class ConfigError(Exception):
     pass
 
 
-def parse(text: str, grammar: str, serializers: Mapping[str, Callable[[SimpleNamespace], None]]) -> None:
+def parse(text: str, grammar: str, serializers: Mapping[str, Callable[[SimpleNamespace, dict[str, Any]], None]]) -> dict[str, Any]:
     usages = _to_usages(grammar)
+    objects: dict[str, Any] = {}
     previous: list[str] = []
     for number, raw in enumerate(text.splitlines(), 1):
         try:
             if parsed := _parse_line(raw, usages, previous):
                 if (serializer := serializers.get(parsed.command)) is None:
                     raise ValueError(f"no serializer for {parsed.command!r}")
-                serializer(parsed.values)
+                serializer(parsed.values, objects)
                 previous = parsed.tokens
         except ValueError as exc:
             raise ConfigError(f"line {number}: {exc}") from None
+    return objects
 
 
-def namespace(
-    grammar: str, cast: Callable[[str, Any], Any] = lambda key, value: value
-) -> tuple[dict[str, Callable[[SimpleNamespace], None]], Callable[[], SimpleNamespace]]:
-    fields = {
-        command: [f.replace("-", "_") for f in dict.fromkeys(re.findall(r"<([\w-]+)>", usage))]
-        for command, usage in _to_usages(grammar).items()
-    }
-    attrs: dict[str, Any] = {}
+def serializers(
+    grammar: str,
+    scalars: Sequence[str] = (),
+    grouped: Sequence[str] = (),
+    cast: Callable[[str, Any], Any] = lambda key, value: value,
+) -> dict[str, Callable[[SimpleNamespace, dict[str, Any]], None]]:
+    if both := set(scalars) & set(grouped):
+        raise ValueError(f"commands in both scalars and grouped: {sorted(both)}")
+    fields = _grammar_fields(grammar, (*scalars, *grouped))
+    for command in scalars:
+        if len(fields[command]) != 2:
+            raise ValueError(f"scalar command {command!r} must have exactly 2 fields, has {fields[command]}")
+    for command in grouped:
+        if len(fields[command]) < 2:
+            raise ValueError(f"grouped command {command!r} must have at least 2 fields, has {fields[command]}")
     group_params: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def entry(command: str, values: SimpleNamespace) -> None:
+    def scalar(command: str, values: SimpleNamespace, objects: dict[str, Any]) -> None:
+        key, value = fields[command]
+        objects[cast(key, getattr(values, key))] = cast(value, getattr(values, value))
+
+    def group(command: str, values: SimpleNamespace, objects: dict[str, Any]) -> None:
         vals = {key: cast(key, value) for key, value in vars(values).items()}
         define, append = vals.pop("define", False), vals.pop("append", False)
-        first = fields[command][0]
-        if len(vals) == 2:
-            attrs[vals[first]] = vals[fields[command][1]]
-            return
-
-        group = vals.pop(first)
+        name = vals.pop(fields[command][0])
         present = {key: value for key, value in vals.items() if value is not None}
-        groups = attrs.setdefault(command, SimpleNamespace())
+        groups = objects.setdefault(command, SimpleNamespace())
         if define:
-            group_params[(command, group)] = present
-            setattr(groups, group, [])
+            group_params[(command, name)] = present
+            setattr(groups, name, [])
         elif append:
-            if (rows := getattr(groups, group, None)) is None:
-                raise ValueError(f"unknown {command} group {group!r}: define it first")
-            rows.append(SimpleNamespace(**group_params[(command, group)], **present))
+            if (rows := getattr(groups, name, None)) is None:
+                raise ValueError(f"unknown {command} group {name!r}: define it first")
+            rows.append(SimpleNamespace(**group_params[(command, name)], **present))
         else:
-            if (rows := getattr(groups, group, None)) is None:
+            if (rows := getattr(groups, name, None)) is None:
                 rows = []
-                setattr(groups, group, rows)
+                setattr(groups, name, rows)
             rows.append(SimpleNamespace(**present))
 
-    return {command: partial(entry, command) for command in fields}, lambda: SimpleNamespace(**attrs)
+    return {**{c: partial(scalar, c) for c in scalars}, **{c: partial(group, c) for c in grouped}}
+
+
+def _grammar_fields(grammar: str, commands: Sequence[str]) -> dict[str, list[str]]:
+    usages = _to_usages(grammar)
+    if unknown := set(commands) - usages.keys():
+        raise ValueError(f"commands not in grammar: {sorted(unknown)}")
+    return {command: [f.replace("-", "_") for f in dict.fromkeys(re.findall(r"<([\w-]+)>", usages[command]))] for command in commands}
 
 
 def _to_usages(grammar: str) -> dict[str, str]:
