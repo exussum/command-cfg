@@ -8,7 +8,7 @@ from typing import Any
 from docopt import DocoptExit, docopt
 
 
-class ConfigError(ValueError):
+class ConfigError(Exception):
     pass
 
 
@@ -67,7 +67,7 @@ def _to_usages(grammar: str) -> dict[str, str]:
     patterns: dict[str, list[str]] = {}
     for pattern in filter(None, (line.strip() for line in grammar.splitlines())):
         patterns.setdefault(pattern.split()[0], []).append(pattern)
-    return {command: "\n".join(lines) for command, lines in patterns.items()}
+    return {command: "Usage: " + "\n".join(lines) for command, lines in patterns.items()}
 
 
 def _parse_line(raw: str, usages: Mapping[str, str], previous: Sequence[str] = ()) -> SimpleNamespace | None:
@@ -80,8 +80,8 @@ def _parse_line(raw: str, usages: Mapping[str, str], previous: Sequence[str] = (
     if (usage := usages.get(tokens[0])) is None:
         raise ValueError(f"unknown command {tokens[0]!r}")
     try:
-        # docopt requires a Usage: header and continuation patterns indented under it
-        parsed = docopt("Usage: " + "\n  ".join(usage.splitlines()), argv=tokens[1:])
+        # docopt requires continuation patterns indented under the Usage: header
+        parsed = docopt("\n  ".join(usage.splitlines()), argv=tokens[1:])
     except DocoptExit:
         raise ValueError(f"{raw.strip()!r} does not match {usage.strip()!r}") from None
     values = {key.strip("<>-").replace("-", "_"): value for key, value in parsed.items()}
