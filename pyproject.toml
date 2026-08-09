@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cmd-config"
+name = "command-cfg"
 version = "0.0.1"
 requires-python = ">=3.14"
 dependencies = [
@@ -26,9 +26,13 @@ target-version = ["py314"]
 [tool.isort]
 profile = "black"
 
+[tool.flake8]
+max-line-length = 140
+extend-ignore = ["E203", "W503"]
+
 [tool.mypy]
 python_version = "3.14"
-files = ["src/cmd_config"]
+files = ["src/command_cfg"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 warn_unused_ignores = true
@@ -38,4 +42,4 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cmd_config"]
+packages = ["src/command_cfg"]

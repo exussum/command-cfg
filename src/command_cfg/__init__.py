@@ -16,7 +16,7 @@ wherever it wants in the `objects` dict parse returns.
 
 from collections import namedtuple
 
-from cmd_config import parse
+from command_cfg import parse
 
 CONFIG = '''
 setting surface grass
