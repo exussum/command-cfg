@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import cmd_config
-from cmd_config import ConfigError, parse
+import command_cfg
+from command_cfg import ConfigError, parse
 
 GRAMMAR = """
 seed <player> <rank>
@@ -93,6 +93,6 @@ def test_parse_errors(name, message):
 
 def test_docstring_example_is_a_working_script():
     marker = "from collections import namedtuple"
-    _, found, script = cmd_config.__doc__.partition(marker)
+    _, found, script = command_cfg.__doc__.partition(marker)
     assert found
     exec(textwrap.dedent(marker + script), {})

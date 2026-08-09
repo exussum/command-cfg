@@ -1,4 +1,4 @@
-# cmd-config
+# command-cfg
 
 Line-oriented config files parsed against a docopt grammar, serialized into
 caller-owned objects.
@@ -29,7 +29,7 @@ is created by this library:
 ```python
 from collections import namedtuple
 
-from cmd_config import parse
+from command_cfg import parse
 
 CONFIG = """
 setting surface grass
@@ -79,4 +79,16 @@ before they reach any serializer (e.g. turning `<start>` into a
 uv run pytest
 uv run black src tests
 uv run mypy
+```
+
+## Publishing
+
+`uv publish` reads the registry and credentials from the environment — copy
+`scripts/deploy.env.example` to `scripts/deploy.env` (gitignored) and set your
+registry, then:
+
+```sh
+. scripts/deploy.env
+uv build
+uv publish
 ```

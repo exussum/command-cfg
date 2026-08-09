@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from cmd_config import ConfigError, parse
+from command_cfg import ConfigError, parse
 
 GRAMMAR = """
 setting <key> <value>
