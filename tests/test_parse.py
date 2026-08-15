@@ -1,4 +1,6 @@
 import re
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -91,8 +93,11 @@ def test_parse_errors(name, message):
         _parse(name)
 
 
-def test_docstring_example_is_a_working_script():
+def test_docstring_example_is_a_working_script(tmp_path):
     marker = "from collections import namedtuple"
     _, found, script = command_cfg.__doc__.partition(marker)
     assert found
-    exec(textwrap.dedent(marker + script), {})
+    example = tmp_path / "example.py"
+    example.write_text(textwrap.dedent(marker + script))
+    result = subprocess.run([sys.executable, str(example)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
