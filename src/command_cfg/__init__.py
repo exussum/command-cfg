@@ -8,13 +8,19 @@ A malformed line raises ConfigError carrying the offending line number.
 
 Every entry in `serializers` wraps a callable in the command's kind. `scalar(factory)`:
 each line is a key/value pair, and the factory is called once after parsing with the
-accumulated pairs as kwargs — one object per command, duplicate keys error.
+accumulated pairs as kwargs — one object per command, duplicate keys error. A command
+with no lines yields `None` and the factory is not called (whereas `group`/`array`
+yield an empty container); config tokens are always strings, so `None` unambiguously
+means the command was absent.
 `group(factory)`: a row factory called once per line, its rows collected in dicts
 of lists keyed by the line's first field — the group key, also passed to the factory
 when `include_key=True`. `array(factory)`: a row factory whose rows collect in a
 flat list, in file order. `raw(serializer)`: the escape hatch, called once per
 command with the list of its lines' parsed values and the objects built so far,
-whatever it returns stored under the command name.
+whatever it returns stored under the command name. `each(handler)`: called once per
+line in file order as `handler(objects, row)`, where `row` is that line's fields
+already run through `cast`; it claims no key of its own — the handler writes into
+`objects` wherever it wants.
 
 Serializers run in their dict order, each seeing the objects earlier commands
 produced: the `cast(key, value, objects)` callable coerces every field value
@@ -128,10 +134,15 @@ class raw:
     serializer: Serializer
 
 
+@dataclass(frozen=True)
+class each:
+    handler: Callable[[dict[str, Any], SimpleNamespace], None]
+
+
 def parse(
     text: str,
     grammar: str,
-    serializers: Mapping[str, scalar | group | array | raw],
+    serializers: Mapping[str, scalar | group | array | raw | each],
     *,
     cast: Cast = lambda key, value, objects: value,
 ) -> dict[str, Any]:
@@ -154,8 +165,10 @@ def parse(
         match kind:
             case raw():
                 objects[command] = _custom(kind, command, lines, objects)
+            case each():
+                _apply(kind, cast, lines, objects)
             case scalar():
-                objects[command] = _merge(kind, fields[command], cast, command, lines, objects)
+                objects[command] = _merge(kind, fields[command], cast, command, lines, objects) if lines else None
             case group():
                 objects[command] = _group(kind, fields[command][0], cast, command, lines, objects)
             case array():
@@ -164,10 +177,10 @@ def parse(
     return objects
 
 
-def _fields(grammar: str, serializers: Mapping[str, scalar | group | array | raw]) -> dict[str, list[str]]:
-    if bare := sorted(command for command, kind in serializers.items() if not isinstance(kind, (scalar, group, array, raw))):
+def _fields(grammar: str, serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:
+    if bare := sorted(command for command, kind in serializers.items() if not isinstance(kind, (scalar, group, array, raw, each))):
         raise ValueError(en.UNWRAPPED.format(commands=bare))
-    kinds = {command: kind for command, kind in serializers.items() if not isinstance(kind, raw)}
+    kinds = {command: kind for command, kind in serializers.items() if not isinstance(kind, (raw, each))}
     fields = _grammar_fields(grammar, tuple(kinds))
 
     for command, kind in kinds.items():
@@ -236,6 +249,13 @@ def _custom(kind: raw, command: str, lines: Lines, objects: Mapping[str, Any]) -
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
+def _apply(kind: each, cast: Cast, lines: Lines, objects: dict[str, Any]) -> None:
+    for number, values in lines:
+        with _located(number):
+            row = SimpleNamespace(**{key: cast(key, value, objects) for key, value in values.items()})
+            kind.handler(objects, row)
+
+
 def _grammar_fields(grammar: str, commands: Sequence[str]) -> dict[str, list[str]]:
     sub_grammars = _sub_grammars(grammar)
     if unknown := set(commands) - sub_grammars.keys():
@@ -250,8 +270,9 @@ def _sub_grammars(grammar: str) -> dict[str, str]:
     sub_grammars = {command: "Usage: " + "\n".join(lines) for command, lines in patterns.items()}
     for command, sub_grammar in sub_grammars.items():
         spellings: dict[str, set[str]] = {}
-        for token in re.findall(r"<[\w-]+>|--[\w-]+", sub_grammar):
-            spellings.setdefault(token.strip("<>-").replace("-", "_"), set()).add(token)
+        for token in re.findall(r"--[\w-]+(?:=<[\w-]+>)?|<[\w-]+>", sub_grammar):
+            spelling = token.split("=")[0]  # an option's =<arg> placeholder names the option, not a positional
+            spellings.setdefault(spelling.strip("<>-").replace("-", "_"), set()).add(spelling)
         for name, tokens in spellings.items():
             if len(tokens) > 1:
                 raise ValueError(en.KEY_COLLISION.format(command=command, tokens=sorted(tokens), key=name))
