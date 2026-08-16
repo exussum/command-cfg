@@ -140,7 +140,7 @@ def test_parse_allows_option_argument_placeholder(grammar):
 def test_parse_rejects_bare_callable():
     with pytest.raises(
         ValueError,
-        match=re.escape("serializers must be scalar/group/array/raw: ['setting'] are unwrapped — write scalar(Settings), not Settings"),
+        match=re.escape("serializers must be scalar/group/array/raw/each: ['setting'] are unwrapped — write scalar(Settings), not Settings"),
     ):
         parse("", GRAMMAR, serializers={"setting": dict})
 
@@ -313,6 +313,34 @@ def test_each_sees_earlier_objects_and_locates_handler_error():
             "round <name> <player>\nmatch <winner>",
             serializers={"round": each(register), "match": each(check)},
         )
+
+
+def test_each_default_seeds_objects_under_command_name():
+    def collect(objects, row):
+        objects["round"].append(row.player)
+
+    objects = parse(
+        "round r Alcaraz\nround r Djokovic",
+        "round <name> <player>",
+        serializers={"round": each(collect, default=list)},
+    )
+    assert objects == {"round": ["Alcaraz", "Djokovic"]}
+
+
+def test_each_default_is_present_and_fresh_when_command_absent():
+    serializer = {"round": each(lambda objects, row: None, default=list)}
+    assert parse("", "round <name> <player>", serializers=serializer) == {"round": []}
+    assert parse("", "round <name> <player>", serializers=serializer) == {"round": []}  # not shared across parses
+
+
+def test_each_default_must_be_keyword():
+    with pytest.raises(TypeError):
+        each(lambda objects, row: None, list)
+
+
+def test_parse_rejects_command_with_hyphen():
+    with pytest.raises(ValueError, match=re.escape("commands must not contain '-': ['ad-hoc']")):
+        parse("", "ad-hoc <name> <player>", serializers={"ad-hoc": each(lambda objects, row: None)})
 
 
 def test_factory_type_errors_carry_line_numbers():

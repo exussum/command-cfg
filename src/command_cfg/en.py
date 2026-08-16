@@ -3,7 +3,8 @@
 LINE_ERROR = "line {number}: {error}"
 COMMAND_ERROR = "{command}: {error}"
 
-UNWRAPPED = "serializers must be scalar/group/array/raw: {commands} are unwrapped — write scalar(Settings), not Settings"
+UNWRAPPED = "serializers must be scalar/group/array/raw/each: {commands} are unwrapped — write scalar(Settings), not Settings"
+COMMAND_HYPHEN = "commands must not contain '-': {commands} — a command name keys the result directly, so use '_' (e.g. 'ad_hoc'); '-' only normalizes in fields"
 SCALAR_FIELDS = "scalar command {command!r} takes exactly 2 fields, grammar has {fields} — grammar must be '{command} <key> <value>'; more fields needs group or array"
 GROUP_FIELDS = "group command {command!r} takes at least 2 fields, grammar has {fields} — add row fields after the group key: '{command} <name> <field>...'"
 RESERVED_FIELDS = (
