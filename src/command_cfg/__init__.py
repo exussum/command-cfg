@@ -13,8 +13,14 @@ accumulated pairs as kwargs — one object per command, duplicate keys error.
 of lists keyed by the line's first field — the group key, also passed to the factory
 when `include_key=True`. `array(factory)`: a row factory whose rows collect in a
 flat list, in file order. `raw(serializer)`: the escape hatch, called once per
-command with the list of its lines' parsed values, whatever it returns stored
-under the command name.
+command with the list of its lines' parsed values and the objects built so far,
+whatever it returns stored under the command name.
+
+Serializers run in their dict order, each seeing the objects earlier commands
+produced: the `cast(key, value, objects)` callable coerces every field value
+before it reaches a factory and can resolve names against those objects. Below,
+`known` rejects any winner or champion who never entered a round — a typo errors
+out instead of silently naming a new player.
 
 from collections import namedtuple
 
@@ -32,19 +38,25 @@ champion Alcaraz
 
 GRAMMAR = '''
 setting <key> <value>
-round <name> <player>
+round <name> <entrant>
 match <winner> <sets>
 champion <player>
 '''
 
 Settings = namedtuple("Settings", "surface")
-Round = namedtuple("Round", "name player")
+Round = namedtuple("Round", "name entrant")
 Match = namedtuple("Match", "winner sets")
 
 
-def champion(rows):
+def known(key, value, objects):
+    if key in ("winner", "player") and not any(value == row.entrant for rows in objects["round"].values() for row in rows):
+        raise ValueError(f"unknown player {value!r}")
+    return value
+
+
+def champion(rows, objects):
     [row] = rows
-    return row.player
+    return known("player", row.player, objects)
 
 
 objects = parse(
@@ -56,6 +68,7 @@ objects = parse(
         "match": array(Match),
         "champion": raw(champion),
     },
+    cast=known,
 )
 assert objects == {
     "setting": Settings(surface="grass"),
@@ -77,8 +90,8 @@ from docopt import DocoptExit, docopt
 
 from command_cfg import en
 
-Cast = Callable[[str, Any], Any]
-Serializer = Callable[[list[SimpleNamespace]], Any]
+Cast = Callable[[str, Any, Mapping[str, Any]], Any]
+Serializer = Callable[[list[SimpleNamespace], Mapping[str, Any]], Any]
 Lines = list[tuple[int, dict[str, Any]]]
 
 
@@ -120,7 +133,7 @@ def parse(
     grammar: str,
     serializers: Mapping[str, scalar | group | array | raw],
     *,
-    cast: Cast = lambda key, value: value,
+    cast: Cast = lambda key, value, objects: value,
 ) -> dict[str, Any]:
     fields = _fields(grammar, serializers)
     sub_grammars = _sub_grammars(grammar)
@@ -140,13 +153,13 @@ def parse(
         lines = parsed_lines.get(command, [])
         match kind:
             case raw():
-                objects[command] = _custom(kind, command, lines)
+                objects[command] = _custom(kind, command, lines, objects)
             case scalar():
-                objects[command] = _merge(kind, fields[command], cast, command, lines)
+                objects[command] = _merge(kind, fields[command], cast, command, lines, objects)
             case group():
-                objects[command] = _group(kind, fields[command][0], cast, command, lines)
+                objects[command] = _group(kind, fields[command][0], cast, command, lines, objects)
             case array():
-                objects[command] = _collect(kind, cast, lines)
+                objects[command] = _collect(kind, cast, lines, objects)
 
     return objects
 
@@ -171,26 +184,26 @@ def _fields(grammar: str, serializers: Mapping[str, scalar | group | array | raw
     return fields
 
 
-def _merge(kind: scalar, fields: Sequence[str], cast: Cast, command: str, lines: Lines) -> Any:
+def _merge(kind: scalar, fields: Sequence[str], cast: Cast, command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
     key, value = fields
     pairs: dict[Any, Any] = {}
     for number, values in lines:
         with _located(number):
-            if (key_value := cast(key, values[key])) in pairs:
+            if (key_value := cast(key, values[key], objects)) in pairs:
                 raise ValueError(en.DUPLICATE_KEY.format(command=command, key=key_value))
-            pairs[key_value] = cast(value, values[value])
+            pairs[key_value] = cast(value, values[value], objects)
     try:
         return kind.factory(**pairs)
     except (TypeError, ValueError) as exc:
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
-def _group(kind: group, key_field: str, cast: Cast, command: str, lines: Lines) -> dict[Any, list[Any]]:
+def _group(kind: group, key_field: str, cast: Cast, command: str, lines: Lines, objects: Mapping[str, Any]) -> dict[Any, list[Any]]:
     groups: dict[Any, list[Any]] = {}
     params: dict[Any, dict[str, Any]] = {}
     for number, values in lines:
         with _located(number):
-            vals = {key: cast(key, value) for key, value in values.items()}
+            vals = {key: cast(key, value, objects) for key, value in values.items()}
             define, append = vals.pop("define", False), vals.pop("append", False)
             name = vals.pop(key_field)
             present = {key: value for key, value in vals.items() if value is not None}
@@ -207,18 +220,18 @@ def _group(kind: group, key_field: str, cast: Cast, command: str, lines: Lines) 
     return groups
 
 
-def _collect(kind: array, cast: Cast, lines: Lines) -> list[Any]:
+def _collect(kind: array, cast: Cast, lines: Lines, objects: Mapping[str, Any]) -> list[Any]:
     rows: list[Any] = []
     for number, values in lines:
         with _located(number):
-            vals = {key: cast(key, value) for key, value in values.items()}
+            vals = {key: cast(key, value, objects) for key, value in values.items()}
             rows.append(kind.factory(**{key: value for key, value in vals.items() if value is not None}))
     return rows
 
 
-def _custom(kind: raw, command: str, lines: Lines) -> Any:
+def _custom(kind: raw, command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
     try:
-        return kind.serializer([SimpleNamespace(**values) for _, values in lines])
+        return kind.serializer([SimpleNamespace(**values) for _, values in lines], objects)
     except (TypeError, ValueError) as exc:
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
