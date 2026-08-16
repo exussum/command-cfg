@@ -20,7 +20,7 @@ FIXTURE = Path(__file__).parent / "fixture"
 
 
 def _parse(name):
-    def record(rows):
+    def record(rows, objects):
         for values in rows:
             rank = getattr(values, "rank", None)
             if rank is not None and not rank.isdigit():

@@ -218,9 +218,64 @@ def test_raw_serializer_collates_its_rows():
     objects = parse(
         "round quarterfinal Alcaraz",
         "round <name> <player>",
-        serializers={"round": raw(lambda rows: [values.player for values in rows])},
+        serializers={"round": raw(lambda rows, objects: [values.player for values in rows])},
     )
     assert objects == {"round": ["Alcaraz"]}
+
+
+def test_cast_resolves_names_against_earlier_objects():
+    def cast(key, value, objects):
+        if key == "winner" and not any(value == row["player"] for rows in objects["round"].values() for row in rows):
+            raise ValueError(f"unknown player {value!r}")
+        return value
+
+    objects = parse(
+        "round quarterfinal Alcaraz\nmatch Alcaraz",
+        "round <name> <player>\nmatch <winner>",
+        serializers={"round": group(dict), "match": array(dict)},
+        cast=cast,
+    )
+    assert objects["match"] == [{"winner": "Alcaraz"}]
+
+
+def test_cast_lookup_failure_carries_line_number():
+    def cast(key, value, objects):
+        if key == "winner" and not any(value == row["player"] for rows in objects["round"].values() for row in rows):
+            raise ValueError(f"unknown player {value!r}")
+        return value
+
+    with pytest.raises(ConfigError, match=re.escape("line 2: unknown player 'Zverev'")):
+        parse(
+            "round quarterfinal Alcaraz\nmatch Zverev",
+            "round <name> <player>\nmatch <winner>",
+            serializers={"round": group(dict), "match": array(dict)},
+            cast=cast,
+        )
+
+
+def test_serializers_run_in_dict_order_and_cast_sees_prior_objects():
+    seen = []
+
+    def cast(key, value, objects):
+        seen.append((key, sorted(objects)))
+        return value
+
+    parse(
+        "setting surface grass\nround quarterfinal Alcaraz\nmatch Alcaraz",
+        "setting <key> <value>\nround <name> <player>\nmatch <winner>",
+        serializers={"setting": scalar(dict), "round": group(dict), "match": array(dict)},
+        cast=cast,
+    )
+    assert sorted(seen) == [("key", []), ("name", ["setting"]), ("player", ["setting"]), ("value", []), ("winner", ["round", "setting"])]
+
+
+def test_raw_serializer_receives_objects_built_so_far():
+    objects = parse(
+        "round quarterfinal Alcaraz\nchampion Alcaraz",
+        "round <name> <player>\nchampion <player>",
+        serializers={"round": group(dict), "champion": raw(lambda rows, objects: (rows[0].player, sorted(objects)))},
+    )
+    assert objects["champion"] == ("Alcaraz", ["round"])
 
 
 def test_factory_type_errors_carry_line_numbers():

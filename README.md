@@ -26,14 +26,15 @@ kind:
 - `array(factory)` — a row factory whose rows collect in a flat list, in
   file order.
 - `raw(serializer)` — the escape hatch: called once per command with the
-  list of its lines' parsed values; whatever it returns is stored under the
-  command name.
+  list of its lines' parsed values and the objects built so far; whatever it
+  returns is stored under the command name.
 
 ## Example
 
 Every kind and file feature in one config — scalar pairs, a quoted token, a
-`#` comment, the `.` ditto token, a `define`/`append` group, array rows, and
-a raw command:
+`#` comment, the `.` ditto token, a `define`/`append` group, array rows, a
+raw command, and a `cast` that resolves player names against the rounds so a
+typo errors out instead of silently naming a new player:
 
 ```python
 from collections import namedtuple
@@ -44,22 +45,21 @@ CONFIG = """
 setting surface grass
 setting best_of 5          # scalar pairs, comments allowed
 
-round quarterfinal 'Carlos Alcaraz'
+round quarterfinal Alcaraz
 round .            Djokovic
 
-game define Final 14:00
+game define Final '14:00 BST'
 game append Final Alcaraz  3
 game append .     Djokovic 1
 
 match Alcaraz 3
-match Sinner  3
 
 champion Alcaraz
 """
 
 GRAMMAR = """
 setting <key> <value>
-round <name> <player>
+round <name> <entrant>
 game define <id> <start>
 game append <id> <player> <sets>
 match <winner> <sets>
@@ -67,14 +67,21 @@ champion <player>
 """
 
 Settings = namedtuple("Settings", "surface best_of")
-Round = namedtuple("Round", "name player")
+Round = namedtuple("Round", "name entrant")
 Game = namedtuple("Game", "start player sets")
 Match = namedtuple("Match", "winner sets")
 
 
-def champion(rows):
+def known(key, value, objects):
+    if key in ("winner", "player") and value is not None:
+        if not any(value == row.entrant for rows in objects["round"].values() for row in rows):
+            raise ValueError(f"unknown player {value!r}")
+    return value
+
+
+def champion(rows, objects):
     [row] = rows
-    return row.player
+    return known("player", row.player, objects)
 
 
 objects = parse(
@@ -87,19 +94,22 @@ objects = parse(
         "match": array(Match),
         "champion": raw(champion),
     },
+    cast=known,
 )
 assert objects == {
     "setting": Settings(surface="grass", best_of="5"),
-    "round": {"quarterfinal": [Round("quarterfinal", "Carlos Alcaraz"), Round("quarterfinal", "Djokovic")]},
-    "game": {"Final": [Game("14:00", "Alcaraz", "3"), Game("14:00", "Djokovic", "1")]},
-    "match": [Match(winner="Alcaraz", sets="3"), Match(winner="Sinner", sets="3")],
+    "round": {"quarterfinal": [Round("quarterfinal", "Alcaraz"), Round("quarterfinal", "Djokovic")]},
+    "game": {"Final": [Game("14:00 BST", "Alcaraz", "3"), Game("14:00 BST", "Djokovic", "1")]},
+    "match": [Match(winner="Alcaraz", sets="3")],
     "champion": "Alcaraz",
 }
 ```
 
-A `cast` callable can be passed to `parse` to coerce values by field name
-before they reach any serializer (e.g. turning `<start>` into a
-`datetime.time`).
+Serializers run in their dict order, each seeing the objects earlier commands
+produced. The `cast(key, value, objects)` callable coerces values by field
+name before they reach any serializer — for type coercion (e.g. turning
+`<start>` into a `datetime.time`) or, as with `known` above, name lookups
+against earlier commands' objects.
 
 ## Development
 
