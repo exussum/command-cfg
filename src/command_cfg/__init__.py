@@ -17,10 +17,13 @@ of lists keyed by the line's first field — the group key, also passed to the f
 when `include_key=True`. `array(factory)`: a row factory whose rows collect in a
 flat list, in file order. `raw(serializer)`: the escape hatch, called once per
 command with the list of its lines' parsed values and the objects built so far,
-whatever it returns stored under the command name. `each(handler)`: called once per
-line in file order as `handler(objects, row)`, where `row` is that line's fields
-already run through `cast`; it claims no key of its own — the handler writes into
-`objects` wherever it wants.
+whatever it returns stored under the command name. `each(handler, default=factory)`:
+called once per line in file order as `handler(objects, row)`, where `row` is that
+line's fields already run through `cast`. With `default`, a fresh `default()` is stored
+under the command name before the lines run, so the handler mutates `objects[command]`
+without a `setdefault` dance; without it, `each` claims no key and the handler writes
+into `objects` wherever it wants. Command names key the result, so they may not contain
+`-` (use `_`); only field names normalize `-` to `_`.
 
 Serializers run in their dict order, each seeing the objects earlier commands
 produced: the `cast(key, value, objects)` callable coerces every field value
@@ -88,7 +91,7 @@ import re
 import shlex
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -137,6 +140,7 @@ class raw:
 @dataclass(frozen=True)
 class each:
     handler: Callable[[dict[str, Any], SimpleNamespace], None]
+    default: Callable[[], Any] | None = field(default=None, kw_only=True)
 
 
 def parse(
@@ -166,7 +170,7 @@ def parse(
             case raw():
                 objects[command] = _custom(kind, command, lines, objects)
             case each():
-                _apply(kind, cast, lines, objects)
+                _apply(kind, command, cast, lines, objects)
             case scalar():
                 objects[command] = _merge(kind, fields[command], cast, command, lines, objects) if lines else None
             case group():
@@ -249,7 +253,9 @@ def _custom(kind: raw, command: str, lines: Lines, objects: Mapping[str, Any]) -
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
-def _apply(kind: each, cast: Cast, lines: Lines, objects: dict[str, Any]) -> None:
+def _apply(kind: each, command: str, cast: Cast, lines: Lines, objects: dict[str, Any]) -> None:
+    if kind.default is not None:
+        objects[command] = kind.default()  # keyed by the command name; a fresh instance per parse
     for number, values in lines:
         with _located(number):
             row = SimpleNamespace(**{key: cast(key, value, objects) for key, value in values.items()})
@@ -267,6 +273,8 @@ def _sub_grammars(grammar: str) -> dict[str, str]:
     patterns: dict[str, list[str]] = {}
     for pattern in filter(None, (line.strip() for line in grammar.splitlines())):
         patterns.setdefault(pattern.split()[0], []).append(pattern)
+    if hyphenated := sorted(command for command in patterns if "-" in command):
+        raise ValueError(en.COMMAND_HYPHEN.format(commands=hyphenated))
     sub_grammars = {command: "Usage: " + "\n".join(lines) for command, lines in patterns.items()}
     for command, sub_grammar in sub_grammars.items():
         spellings: dict[str, set[str]] = {}
