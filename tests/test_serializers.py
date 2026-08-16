@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from command_cfg import ConfigError, parse
+from command_cfg import ConfigError, array, group, parse, raw, scalar
 
 GRAMMAR = """
 setting <key> <value>
@@ -41,9 +41,7 @@ def _parse(name):
     objects = parse(
         (FIXTURE / f"{name}.ccfg").read_text(),
         GRAMMAR,
-        serializers={"setting": Settings, "round": Round, "game": Game},
-        scalars=("setting",),
-        grouped=("round", "game"),
+        serializers={"setting": scalar(Settings), "round": group(Round), "game": group(Game)},
     )
     return NS(**objects)
 
@@ -75,37 +73,72 @@ def test_serializers(name, expected):
 
 
 def test_parse_rejects_unknown_command():
-    with pytest.raises(ValueError, match=re.escape("commands not in grammar: ['umpire']")):
-        parse("", GRAMMAR, scalars=("umpire",))
+    with pytest.raises(
+        ValueError,
+        match=re.escape("commands not in grammar: ['umpire'] — add a grammar line starting with each or remove them from serializers"),
+    ):
+        parse("", GRAMMAR, serializers={"umpire": array(dict)})
 
 
 def test_parse_coerces_scalars_to_dict_factory():
-    assert parse("setting surface clay", GRAMMAR, serializers={"setting": dict}, scalars=("setting",)) == {"setting": {"surface": "clay"}}
+    assert parse("setting surface clay", GRAMMAR, serializers={"setting": scalar(dict)}) == {"setting": {"surface": "clay"}}
 
 
 def test_parse_calls_scalar_factory_when_command_absent():
     with pytest.raises(ConfigError, match="setting: .*missing.*surface"):
-        parse("", GRAMMAR, serializers={"setting": Settings}, scalars=("setting",))
+        parse("", GRAMMAR, serializers={"setting": scalar(Settings)})
 
 
 def test_parse_rejects_duplicate_scalar_key():
-    with pytest.raises(ConfigError, match=re.escape("line 2: duplicate setting 'surface'")):
-        parse("setting surface clay\nsetting surface grass", GRAMMAR, serializers={"setting": dict}, scalars=("setting",))
+    with pytest.raises(ConfigError, match=re.escape("line 2: duplicate setting 'surface' — delete this line or change its key")):
+        parse("setting surface clay\nsetting surface grass", GRAMMAR, serializers={"setting": scalar(dict)})
 
 
 def test_parse_rejects_wrong_scalar_field_count():
-    with pytest.raises(ValueError, match=re.escape("scalar command 'round' must have exactly 2 fields")):
-        parse("", GRAMMAR, scalars=("round",))
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "scalar command 'round' takes exactly 2 fields, grammar has ['name', 'player', 'result'] — grammar must be 'round <key> <value>'; more fields needs group or array"
+        ),
+    ):
+        parse("", GRAMMAR, serializers={"round": scalar(dict)})
 
 
 def test_parse_rejects_too_few_grouped_fields():
-    with pytest.raises(ValueError, match=re.escape("grouped command 'solo' must have at least 2 fields")):
-        parse("", "solo <name>", serializers={"solo": dict}, grouped=("solo",))
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "group command 'solo' takes at least 2 fields, grammar has ['name'] — add row fields after the group key: 'solo <name> <field>...'"
+        ),
+    ):
+        parse("", "solo <name>", serializers={"solo": group(dict)})
 
 
-def test_parse_rejects_command_in_both_styles():
-    with pytest.raises(ValueError, match=re.escape("commands in both scalars and grouped: ['setting']")):
-        parse("", GRAMMAR, serializers={"setting": dict}, scalars=("setting",), grouped=("setting",))
+def test_parse_rejects_reserved_grouped_fields():
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "group command 'step' uses reserved fields ['append'] — rename them in the grammar; define/append are grouping keywords"
+        ),
+    ):
+        parse("", "step <name> <append>", serializers={"step": group(dict)})
+
+
+@pytest.mark.parametrize("grammar", ["pick <set> [--set=<v>]", "pick [--set=<set>]"])
+def test_parse_rejects_grammar_names_that_normalize_identically(grammar):
+    with pytest.raises(
+        ValueError,
+        match=re.escape("pick grammar: ['--set', '<set>'] normalize to the same key 'set' — rename the option or the positional"),
+    ):
+        parse("", grammar, serializers={"pick": array(dict)})
+
+
+def test_parse_rejects_bare_callable():
+    with pytest.raises(
+        ValueError,
+        match=re.escape("serializers must be scalar/group/array/raw: ['setting'] are unwrapped — write scalar(Settings), not Settings"),
+    ):
+        parse("", GRAMMAR, serializers={"setting": dict})
 
 
 def test_grouped_two_fields_accumulates():
@@ -116,23 +149,91 @@ def test_grouped_two_fields_accumulates():
     objects = parse(
         "round quarterfinal Alcaraz\nround quarterfinal Djokovic",
         "round <name> <player>",
-        serializers={"round": Entrant},
-        grouped=("round",),
+        serializers={"round": group(Entrant)},
     )
     assert objects["round"]["quarterfinal"] == [Entrant("Alcaraz"), Entrant("Djokovic")]
+
+
+def test_grouped_include_key_passes_group_key_to_rows():
+    @dataclass
+    class Entrant:
+        name: str
+        player: str
+
+    objects = parse(
+        "round quarterfinal Alcaraz",
+        "round <name> <player>",
+        serializers={"round": group(Entrant, include_key=True)},
+    )
+    assert objects["round"] == {"quarterfinal": [Entrant("quarterfinal", "Alcaraz")]}
+
+
+def test_grouped_include_key_appends_with_defined_params():
+    objects = parse(
+        "game define Final 14:00\ngame append Final Alcaraz",
+        "game define <id> <start>\ngame append <id> <player>",
+        serializers={"game": group(dict, include_key=True)},
+    )
+    assert objects["game"] == {"Final": [{"id": "Final", "start": "14:00", "player": "Alcaraz"}]}
+
+
+def test_group_append_to_undefined_group_errors_even_if_rows_exist():
+    with pytest.raises(ConfigError, match=re.escape("line 2: unknown game group 'Final' — add 'game define Final ...' on an earlier line")):
+        parse(
+            "game Final Alcaraz\ngame append Final Djokovic",
+            "game <name> <player>\ngame append <name> <player>",
+            serializers={"game": group(dict)},
+        )
+
+
+def test_array_accumulates_rows_in_file_order():
+    @dataclass
+    class Match:
+        winner: str
+        sets: str
+
+    objects = parse(
+        "match Alcaraz 3\nmatch Alcaraz 3",
+        "match <winner> <sets>",
+        serializers={"match": array(Match)},
+    )
+    assert objects["match"] == [Match("Alcaraz", "3"), Match("Alcaraz", "3")]
+
+
+def test_array_rejects_zero_fields():
+    with pytest.raises(
+        ValueError, match=re.escape("array command 'retire' takes at least 1 field, grammar has none — add '<field>'s to its grammar line")
+    ):
+        parse("", "retire", serializers={"retire": array(dict)})
+
+
+def test_absent_group_and_array_commands_yield_empty_containers():
+    assert parse("", "round <name> <player>\nmatch <winner>", serializers={"round": group(dict), "match": array(dict)}) == {
+        "round": {},
+        "match": [],
+    }
+
+
+def test_raw_serializer_collates_its_rows():
+    objects = parse(
+        "round quarterfinal Alcaraz",
+        "round <name> <player>",
+        serializers={"round": raw(lambda rows: [values.player for values in rows])},
+    )
+    assert objects == {"round": ["Alcaraz"]}
+
+
+def test_factory_type_errors_carry_line_numbers():
+    with pytest.raises(ConfigError, match="^line 1: "):
+        parse("round quarterfinal Alcaraz", "round <name> <player>", serializers={"round": group(Round)})
 
 
 @pytest.mark.parametrize(
     "name,message",
     [
-        ("orphan_append", "line 1: unknown game group 'Nope': define it first"),
+        ("orphan_append", "line 1: unknown game group 'Nope' — add 'game define Nope ...' on an earlier line"),
     ],
 )
 def test_serializer_errors(name, message):
     with pytest.raises(ConfigError, match="^" + re.escape(message) + "$"):
         _parse(name)
-
-
-def test_parse_rejects_style_without_factory():
-    with pytest.raises(ValueError, match=re.escape("commands need a factory in serializers: ['round', 'setting']")):
-        parse("", GRAMMAR, scalars=("setting",), grouped=("round",))

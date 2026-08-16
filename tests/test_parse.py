@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 
 import command_cfg
-from command_cfg import ConfigError, parse
+from command_cfg import ConfigError, parse, raw
 
 GRAMMAR = """
 seed <player> <rank>
 match define <id> <name>
-match append <id> <player> <score> [--set=<set>]
+match append <id> <player> <score> [--set=<v>]
 umpire <name>
 """
 
@@ -20,13 +20,15 @@ FIXTURE = Path(__file__).parent / "fixture"
 
 
 def _parse(name):
-    def record(values, objects):
-        rank = getattr(values, "rank", None)
-        if rank is not None and not rank.isdigit():
-            raise ValueError(f"not a number: {rank!r}")
-        objects.setdefault("rows", []).append(vars(values))
+    def record(rows):
+        for values in rows:
+            rank = getattr(values, "rank", None)
+            if rank is not None and not rank.isdigit():
+                raise ValueError(f"not a number: {rank!r}")
+        return [vars(values) for values in rows]
 
-    return parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": record, "match": record})["rows"]
+    objects = parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": raw(record), "match": raw(record)})
+    return objects["seed"] + objects["match"]
 
 
 @pytest.mark.parametrize(
@@ -80,12 +82,12 @@ def test_parse(name, expected):
 @pytest.mark.parametrize(
     "name,message",
     [
-        ("unknown_command", "line 2: unknown command 'rank'"),
+        ("unknown_command", "line 2: unknown command 'rank' — no grammar line starts with it; grammar has ['match', 'seed', 'umpire']"),
         ("usage_mismatch", "line 1: 'seed Alcaraz' does not match 'Usage: seed <player> <rank>'"),
-        ("ditto_no_previous", "line 1: '.' has nothing above it to repeat"),
-        ("ditto_command", "line 2: unknown command '.'"),
-        ("no_serializer", "line 1: no serializer for 'umpire'"),
-        ("serializer_error", "line 2: not a number: 'best'"),
+        ("ditto_no_previous", "line 1: '.' repeats the token in this position from the previous line, which has none — type the token out"),
+        ("ditto_command", "line 2: unknown command '.' — no grammar line starts with it; grammar has ['match', 'seed', 'umpire']"),
+        ("no_serializer", "line 1: no serializer for 'umpire' — add a 'umpire' entry to serializers or delete the line"),
+        ("serializer_error", "seed: not a number: 'best'"),
     ],
 )
 def test_parse_errors(name, message):

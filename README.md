@@ -11,61 +11,89 @@ and dispatched to a serializer. A malformed line raises `ConfigError`
 carrying the offending line number.
 
 Every object in the result comes from `serializers` — nothing in the result
-is created by this library:
+is created by this library. Each entry wraps a callable in the command's
+kind:
 
-- A command listed in `grouped` maps to a row factory, called once per line
-  with the line's fields as kwargs; its rows are collected in dicts of lists
-  keyed by the line's first field. `define`/`append` grammar pairs hoist
-  shared values: `define` names a group and carries its parameters, `append`
-  adds a row, and every row carries the group's parameters merged in.
-- A command listed in `scalars` also maps to a factory, called once after
-  parsing with the accumulated key/value pairs as kwargs — one object per
-  command, duplicate keys are an error.
-- Any other command maps to a function `(values, objects) -> None` that
-  writes wherever it wants in the `objects` dict `parse` returns.
+- `scalar(factory)` — each line is a key/value pair, and the factory is
+  called once after parsing with the accumulated pairs as kwargs — one
+  object per command, duplicate keys are an error.
+- `group(factory)` — a row factory, called once per line with the line's
+  fields as kwargs; its rows are collected in dicts of lists keyed by the
+  line's first field — the group key, also passed to the factory when
+  `include_key=True`. `define`/`append` grammar pairs hoist shared values:
+  `define` names a group and carries its parameters, `append` adds a row,
+  and every row carries the group's parameters merged in.
+- `array(factory)` — a row factory whose rows collect in a flat list, in
+  file order.
+- `raw(serializer)` — the escape hatch: called once per command with the
+  list of its lines' parsed values; whatever it returns is stored under the
+  command name.
 
 ## Example
+
+Every kind and file feature in one config — scalar pairs, a quoted token, a
+`#` comment, the `.` ditto token, a `define`/`append` group, array rows, and
+a raw command:
 
 ```python
 from collections import namedtuple
 
-from command_cfg import parse
+from command_cfg import array, group, parse, raw, scalar
 
 CONFIG = """
 setting surface grass
+setting best_of 5          # scalar pairs, comments allowed
 
-round quarterfinal Alcaraz
-round quarterfinal Djokovic
+round quarterfinal 'Carlos Alcaraz'
+round .            Djokovic
+
+game define Final 14:00
+game append Final Alcaraz  3
+game append .     Djokovic 1
 
 match Alcaraz 3
+match Sinner  3
+
+champion Alcaraz
 """
 
 GRAMMAR = """
 setting <key> <value>
 round <name> <player>
+game define <id> <start>
+game append <id> <player> <sets>
 match <winner> <sets>
+champion <player>
 """
 
-Settings = namedtuple("Settings", "surface")
-Round = namedtuple("Round", "player")
+Settings = namedtuple("Settings", "surface best_of")
+Round = namedtuple("Round", "name player")
+Game = namedtuple("Game", "start player sets")
 Match = namedtuple("Match", "winner sets")
 
 
-def match(values, objects):
-    objects.setdefault("matches", []).append(Match(values.winner, int(values.sets)))
+def champion(rows):
+    [row] = rows
+    return row.player
 
 
 objects = parse(
     CONFIG,
     GRAMMAR,
-    serializers={"setting": Settings, "round": Round, "match": match},
-    scalars=("setting",),
-    grouped=("round",),
+    {
+        "setting": scalar(Settings),
+        "round": group(Round, include_key=True),
+        "game": group(Game),
+        "match": array(Match),
+        "champion": raw(champion),
+    },
 )
 assert objects == {
-    "setting": Settings(surface="grass"),
-    "round": {"quarterfinal": [Round(player="Alcaraz"), Round(player="Djokovic")]},
-    "matches": [Match(winner="Alcaraz", sets=3)],
+    "setting": Settings(surface="grass", best_of="5"),
+    "round": {"quarterfinal": [Round("quarterfinal", "Carlos Alcaraz"), Round("quarterfinal", "Djokovic")]},
+    "game": {"Final": [Game("14:00", "Alcaraz", "3"), Game("14:00", "Djokovic", "1")]},
+    "match": [Match(winner="Alcaraz", sets="3"), Match(winner="Sinner", sets="3")],
+    "champion": "Alcaraz",
 }
 ```
 
