@@ -1,59 +1,55 @@
 """Line-oriented config files parsed against a docopt grammar, serialized into caller-owned objects.
 
 A config file is a sequence of command lines with shell-style quoting, `#` comments,
-and a `.` token that repeats the token in the same position on the line above. The
-grammar is one docopt usage pattern per line, its first word the command name; each
-config line is matched against its command's patterns and dispatched to a serializer.
-A malformed line raises ConfigError carrying the offending line number.
+and a `.` token repeating the token in the same position on the line above. The
+grammar is one docopt usage pattern per line, first word the command name; each
+config line matches its command's patterns and dispatches to a serializer. A
+malformed line raises ConfigError with the offending line number.
 
-Every entry in `serializers` wraps a callable in the command's kind. `scalar(factory)`:
-each line is a key/value pair, and the factory is called once after parsing with the
-accumulated pairs as kwargs — one object per command, duplicate keys error. A command
-with no lines yields `None` and the factory is not called (whereas `group`/`array`
-yield an empty container); a present field is never `None` — even one coerced to `int`
-or `float` — so `None` unambiguously means the command was absent.
-`group(factory)`: a row factory called once per line, its rows collected in dicts
-of lists keyed by the line's first field — the group key, also passed to the factory
-when `include_key=True`. `array(factory)`: a row factory whose rows collect in a
-flat list, in file order. `raw(serializer)`: the escape hatch, called once per
-command with the list of its lines' parsed values and the objects built so far,
-whatever it returns stored under the command name. `each(handler, default=factory)`:
-called once per line in file order as `handler(objects, row)`, where `row` is that
-line's fields already coerced per `<field:type>`/`types`. With `default`, a fresh
-`default()` is stored under the command name before the lines run, so the handler
-mutates `objects[command]` without a `setdefault` dance; without it, `each` claims
-no key and the handler writes into `objects` wherever it wants. Command names key
-the result, so they may not contain `-` (use `_`); only field names normalize `-`
-to `_`.
+Every `serializers` entry wraps a callable in the command's kind. `scalar(factory)`:
+each line is a key/value pair; the factory is called once after parsing with the
+accumulated pairs as kwargs — duplicate keys error. A command with no lines yields
+`None` without calling the factory (`group`/`array` instead yield an empty
+container); a present field is never `None`, even one coerced to `int`/`float`, so
+`None` unambiguously means the command was absent. `group(factory)`: a row factory
+called once per line, rows collected in dicts of lists keyed by the line's first
+field — the group key, also passed to the factory when `include_key=True`.
+`array(factory)`: a row factory whose rows collect in one flat list, in file order.
+`raw(serializer)`: the escape hatch, called once per command with the list of its
+lines' parsed values plus the objects built so far, whatever it returns stored
+under the command name. `each(handler, default=factory)`: called once per line as
+`handler(objects, row)`, `row`'s fields already coerced per `<field:type>`/`types`.
+`default`, if given, seeds `objects[command]` with a fresh `default()` before the
+lines run so the handler can mutate it without a `setdefault`; without it, `each`
+claims no key and the handler writes into `objects` wherever it wants. Command
+names key the result, so they may not contain `-` (use `_`); only field names
+normalize `-` to `_`.
 
-Serializers run in their dict order, each seeing the objects earlier commands
-produced: `raw` and `each` receive `objects` directly, so a serializer or handler
-can resolve or validate a value against commands parsed earlier. Below, `known`
-rejects any champion who never entered a round — a typo errors out instead of
-silently naming a new player.
+Serializers run in dict order, each seeing the objects earlier commands produced:
+`raw` and `each` get `objects` directly, so they can resolve or validate a value
+against commands parsed earlier. Below, `known` rejects any champion who never
+entered a round — a typo errors out instead of silently naming a new player.
 
 A placeholder can name its type as `<field:type>`, converted before the value
-reaches a factory. `command_cfg` has no built-in type names — `type` is looked up
-in the `types` mapping passed to `Parser`/`parse`, so `Parser(GRAMMAR, serializers,
+reaches a factory. There's no built-in type table — `type` is looked up in the
+`types` mapping passed to `Parser`/`parse`, so `Parser(GRAMMAR, serializers,
 types={"int": int})` is what makes `<sets:int>` below turn `Match.sets` into `3`,
-not `"3"`. A bare `<field>` is left as `str`.
+not `"3"`. A bare `<field>` stays `str`.
 
-Every kind also takes its own `types` mapping as a per-field override, an
-alternative to grammar placeholders so a command can know its conversions without
-touching the grammar text — it's keyed straight to a callable, not a name to look
-up, and defaults to `{"str": str, "int": int, "float": float}` for every field that
-isn't overridden. For `group`/`array`/`each`/`raw` it's keyed by field name, same as
-`<field:type>`. `scalar`'s `<key> <value>` line has only one `<value>` placeholder
-shared by every row, so its `types` is keyed by each row's `key` instead —
-`scalar(Settings, types={"best_of": int})` types `best_of`'s value as `int` while
-every other setting stays `str`. Either way, the mapping lives only on that
-command's own `scalar(...)`/`group(...)`/etc. instance — it's not global, so it
-can't affect any other command.
+Every kind also takes its own `types` mapping as a per-field override — keyed
+straight to a callable, not a name to look up — defaulting to `{"str": str, "int":
+int, "float": float}` for every field that isn't overridden. For `group`/`array`/
+`each`/`raw` it's keyed by field name, same as `<field:type>`. `scalar`'s
+`<key> <value>` line has one `<value>` placeholder shared by every row, so its
+`types` is keyed by each row's `key` instead — `scalar(Settings, types={"best_of":
+int})` types `best_of` as `int`, every other setting stays `str`. The mapping lives
+only on that command's own `scalar(...)`/`group(...)`/etc. instance — it's not
+global, so it can't affect any other command.
 
 `Parser(grammar, serializers, types={})` validates the grammar and every kind's
-`types` once; `.parse(text)` can then be called repeatedly on it, reusing that setup
-— useful when many texts share one grammar. `parse(text, grammar, serializers,
-types={})` is a one-line convenience for a single parse, equivalent to
+`types` once; `.parse(text)` reuses that setup across repeated parses — useful
+when many texts share one grammar. `parse(text, grammar, serializers, types={})`
+is a one-line convenience for a single parse, equivalent to
 `Parser(grammar, serializers, types).parse(text)`.
 
 from collections import namedtuple
