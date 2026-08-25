@@ -10,8 +10,8 @@ Every entry in `serializers` wraps a callable in the command's kind. `scalar(fac
 each line is a key/value pair, and the factory is called once after parsing with the
 accumulated pairs as kwargs — one object per command, duplicate keys error. A command
 with no lines yields `None` and the factory is not called (whereas `group`/`array`
-yield an empty container); config tokens are always strings, so `None` unambiguously
-means the command was absent.
+yield an empty container); a present field is never `None` — even one coerced to `int`
+or `float` — so `None` unambiguously means the command was absent.
 `group(factory)`: a row factory called once per line, its rows collected in dicts
 of lists keyed by the line's first field — the group key, also passed to the factory
 when `include_key=True`. `array(factory)`: a row factory whose rows collect in a
@@ -19,21 +19,46 @@ flat list, in file order. `raw(serializer)`: the escape hatch, called once per
 command with the list of its lines' parsed values and the objects built so far,
 whatever it returns stored under the command name. `each(handler, default=factory)`:
 called once per line in file order as `handler(objects, row)`, where `row` is that
-line's fields already run through `cast`. With `default`, a fresh `default()` is stored
-under the command name before the lines run, so the handler mutates `objects[command]`
-without a `setdefault` dance; without it, `each` claims no key and the handler writes
-into `objects` wherever it wants. Command names key the result, so they may not contain
-`-` (use `_`); only field names normalize `-` to `_`.
+line's fields already coerced per `<field:type>`/`types`. With `default`, a fresh
+`default()` is stored under the command name before the lines run, so the handler
+mutates `objects[command]` without a `setdefault` dance; without it, `each` claims
+no key and the handler writes into `objects` wherever it wants. Command names key
+the result, so they may not contain `-` (use `_`); only field names normalize `-`
+to `_`.
 
 Serializers run in their dict order, each seeing the objects earlier commands
-produced: the `cast(key, value, objects)` callable coerces every field value
-before it reaches a factory and can resolve names against those objects. Below,
-`known` rejects any winner or champion who never entered a round — a typo errors
-out instead of silently naming a new player.
+produced: `raw` and `each` receive `objects` directly, so a serializer or handler
+can resolve or validate a value against commands parsed earlier. Below, `known`
+rejects any champion who never entered a round — a typo errors out instead of
+silently naming a new player.
+
+A placeholder can name its type as `<field:type>`, converted before the value
+reaches a factory. `command_cfg` has no built-in type names — `type` is looked up
+in the `types` mapping passed to `Parser`/`parse`, so `Parser(GRAMMAR, serializers,
+types={"int": int})` is what makes `<sets:int>` below turn `Match.sets` into `3`,
+not `"3"`. A bare `<field>` is left as `str`.
+
+Every kind also takes its own `types` mapping as a per-field override, an
+alternative to grammar placeholders so a command can know its conversions without
+touching the grammar text — it's keyed straight to a callable, not a name to look
+up, and defaults to `{"str": str, "int": int, "float": float}` for every field that
+isn't overridden. For `group`/`array`/`each`/`raw` it's keyed by field name, same as
+`<field:type>`. `scalar`'s `<key> <value>` line has only one `<value>` placeholder
+shared by every row, so its `types` is keyed by each row's `key` instead —
+`scalar(Settings, types={"best_of": int})` types `best_of`'s value as `int` while
+every other setting stays `str`. Either way, the mapping lives only on that
+command's own `scalar(...)`/`group(...)`/etc. instance — it's not global, so it
+can't affect any other command.
+
+`Parser(grammar, serializers, types={})` validates the grammar and every kind's
+`types` once; `.parse(text)` can then be called repeatedly on it, reusing that setup
+— useful when many texts share one grammar. `parse(text, grammar, serializers,
+types={})` is a one-line convenience for a single parse, equivalent to
+`Parser(grammar, serializers, types).parse(text)`.
 
 from collections import namedtuple
 
-from command_cfg import array, group, parse, raw, scalar
+from command_cfg import Parser, array, group, raw, scalar
 
 CONFIG = '''
 setting surface grass
@@ -48,7 +73,7 @@ champion Alcaraz
 GRAMMAR = '''
 setting <key> <value>
 round <name> <entrant>
-match <winner> <sets>
+match <winner> <sets:int>
 champion <player>
 '''
 
@@ -57,19 +82,18 @@ Round = namedtuple("Round", "name entrant")
 Match = namedtuple("Match", "winner sets")
 
 
-def known(key, value, objects):
-    if key in ("winner", "player") and not any(value == row.entrant for rows in objects["round"].values() for row in rows):
-        raise ValueError(f"unknown player {value!r}")
-    return value
+def known(player, objects):
+    if not any(player == row.entrant for rows in objects["round"].values() for row in rows):
+        raise ValueError(f"unknown player {player!r}")
+    return player
 
 
 def champion(rows, objects):
     [row] = rows
-    return known("player", row.player, objects)
+    return known(row.player, objects)
 
 
-objects = parse(
-    CONFIG,
+objects = Parser(
     GRAMMAR,
     {
         "setting": scalar(Settings),
@@ -77,30 +101,26 @@ objects = parse(
         "match": array(Match),
         "champion": raw(champion),
     },
-    cast=known,
-)
+    types={"int": int},
+).parse(CONFIG)
 assert objects == {
     "setting": Settings(surface="grass"),
     "round": {"quarterfinal": [Round("quarterfinal", "Alcaraz"), Round("quarterfinal", "Djokovic")]},
-    "match": [Match(winner="Alcaraz", sets="3")],
+    "match": [Match(winner="Alcaraz", sets=3)],
     "champion": "Alcaraz",
 }
 """
 
-import re
-import shlex
+from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from docopt import DocoptExit, docopt
-
 from command_cfg import en
+from command_cfg.models import array, each, group, raw, scalar
+from command_cfg.parser import coerce, docopt_grammars, grammar_fields, parse_line
 
-Cast = Callable[[str, Any, Mapping[str, Any]], Any]
-Serializer = Callable[[list[SimpleNamespace], Mapping[str, Any]], Any]
 Lines = list[tuple[int, dict[str, Any]]]
 
 
@@ -109,83 +129,70 @@ class ConfigError(Exception):
 
 
 @contextmanager
-def _located(number: int) -> Iterator[None]:
+def exc_handler(number: int) -> Iterator[None]:
     try:
         yield
     except (TypeError, ValueError) as exc:
         raise ConfigError(en.LINE_ERROR.format(number=number, error=exc)) from None
 
 
-@dataclass(frozen=True)
-class scalar:
-    factory: Callable[..., Any]
+class Parser:
+    def __init__(
+        self,
+        grammar: str,
+        serializers: Mapping[str, scalar | group | array | raw | each],
+        types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
+    ) -> None:
+        self.serializers = serializers
+        self.docopt_grammars, self.types = docopt_grammars(grammar, types)
+        self.fields = _fields(self.docopt_grammars, serializers)
 
+    def parse(self, text: str) -> dict[str, Any]:
+        parsed_lines: defaultdict[str, Lines] = defaultdict(list)
 
-@dataclass(frozen=True)
-class group:
-    factory: Callable[..., Any]
-    include_key: bool = False
+        previous: list[str] = []
+        for number, line in enumerate(text.splitlines(), 1):
+            with exc_handler(number):
+                if parsed := parse_line(line, self.docopt_grammars, previous):
+                    if parsed.command not in self.serializers:
+                        raise ValueError(en.NO_SERIALIZER.format(command=parsed.command))
+                    values = coerce(self.types[parsed.command], parsed.values)
+                    parsed_lines[parsed.command].append((number, values))
+                    previous = parsed.tokens
 
+        objects: dict[str, Any] = {}
+        for command, kind in self.serializers.items():
+            lines = parsed_lines.get(command, [])
+            match kind:
+                case raw():
+                    objects[command] = _process_raw(kind, command, lines, objects)
+                case each():
+                    _process_each(kind, command, lines, objects)
+                case scalar():
+                    objects[command] = _process_scalar(kind, self.fields[command], command, lines) if lines else None
+                case group():
+                    objects[command] = _process_group(kind, self.fields[command][0], command, lines)
+                case array():
+                    objects[command] = _process_array(kind, lines)
 
-@dataclass(frozen=True)
-class array:
-    factory: Callable[..., Any]
-
-
-@dataclass(frozen=True)
-class raw:
-    serializer: Serializer
-
-
-@dataclass(frozen=True)
-class each:
-    handler: Callable[[dict[str, Any], SimpleNamespace], None]
-    default: Callable[[], Any] | None = field(default=None, kw_only=True)
+        return objects
 
 
 def parse(
     text: str,
     grammar: str,
     serializers: Mapping[str, scalar | group | array | raw | each],
-    *,
-    cast: Cast = lambda key, value, objects: value,
+    types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
 ) -> dict[str, Any]:
-    fields = _fields(grammar, serializers)
-    sub_grammars = _sub_grammars(grammar)
-    parsed_lines: dict[str, Lines] = {}
-    previous: list[str] = []
-
-    for number, line in enumerate(text.splitlines(), 1):
-        with _located(number):
-            if parsed := _parse(line, sub_grammars, previous):
-                if parsed.command not in serializers:
-                    raise ValueError(en.NO_SERIALIZER.format(command=parsed.command))
-                parsed_lines.setdefault(parsed.command, []).append((number, parsed.values))
-                previous = parsed.tokens
-
-    objects: dict[str, Any] = {}
-    for command, kind in serializers.items():
-        lines = parsed_lines.get(command, [])
-        match kind:
-            case raw():
-                objects[command] = _custom(kind, command, lines, objects)
-            case each():
-                _apply(kind, command, cast, lines, objects)
-            case scalar():
-                objects[command] = _merge(kind, fields[command], cast, command, lines, objects) if lines else None
-            case group():
-                objects[command] = _group(kind, fields[command][0], cast, command, lines, objects)
-            case array():
-                objects[command] = _collect(kind, cast, lines, objects)
-
-    return objects
+    return Parser(grammar, serializers, types).parse(text)
 
 
-def _fields(grammar: str, serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:
+def _fields(docopt_grammars: Mapping[str, str], serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:
     if bare := sorted(command for command, kind in serializers.items() if not isinstance(kind, (scalar, group, array, raw, each))):
         raise ValueError(en.UNWRAPPED.format(commands=bare))
+
     kinds = {command: kind for command, kind in serializers.items() if not isinstance(kind, (raw, each))}
-    fields = _grammar_fields(grammar, tuple(kinds))
+    fields = grammar_fields(docopt_grammars, tuple(kinds))
 
     for command, kind in kinds.items():
         match kind:
@@ -201,26 +208,27 @@ def _fields(grammar: str, serializers: Mapping[str, scalar | group | array | raw
     return fields
 
 
-def _merge(kind: scalar, fields: Sequence[str], cast: Cast, command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
+def _process_scalar(kind: scalar, fields: Sequence[str], command: str, lines: Lines) -> Any:
     key, value = fields
     pairs: dict[Any, Any] = {}
     for number, values in lines:
-        with _located(number):
-            if (key_value := cast(key, values[key], objects)) in pairs:
+        with exc_handler(number):
+            if (key_value := values[key]) in pairs:
                 raise ValueError(en.DUPLICATE_KEY.format(command=command, key=key_value))
-            pairs[key_value] = cast(value, values[value], objects)
+            raw_value = values[value]
+            pairs[key_value] = kind.types.get(key_value, str)(raw_value) if isinstance(raw_value, str) else raw_value
     try:
         return kind.factory(**pairs)
     except (TypeError, ValueError) as exc:
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
-def _group(kind: group, key_field: str, cast: Cast, command: str, lines: Lines, objects: Mapping[str, Any]) -> dict[Any, list[Any]]:
-    groups: dict[Any, list[Any]] = {}
+def _process_group(kind: group, key_field: str, command: str, lines: Lines) -> dict[Any, list[Any]]:
+    groups: defaultdict[Any, list[Any]] = defaultdict(list)
     params: dict[Any, dict[str, Any]] = {}
     for number, values in lines:
-        with _located(number):
-            vals = {key: cast(key, value, objects) for key, value in values.items()}
+        with exc_handler(number):
+            vals = dict(coerce(kind.types, values))
             define, append = vals.pop("define", False), vals.pop("append", False)
             name = vals.pop(key_field)
             present = {key: value for key, value in vals.items() if value is not None}
@@ -233,74 +241,30 @@ def _group(kind: group, key_field: str, cast: Cast, command: str, lines: Lines, 
                     raise ValueError(en.UNKNOWN_GROUP.format(command=command, name=name))
                 groups[name].append(kind.factory(**defined, **row_kwargs))
             else:
-                groups.setdefault(name, []).append(kind.factory(**row_kwargs))
-    return groups
+                groups[name].append(kind.factory(**row_kwargs))
+    return dict(groups)
 
 
-def _collect(kind: array, cast: Cast, lines: Lines, objects: Mapping[str, Any]) -> list[Any]:
+def _process_array(kind: array, lines: Lines) -> list[Any]:
     rows: list[Any] = []
     for number, values in lines:
-        with _located(number):
-            vals = {key: cast(key, value, objects) for key, value in values.items()}
+        with exc_handler(number):
+            vals = coerce(kind.types, values)
             rows.append(kind.factory(**{key: value for key, value in vals.items() if value is not None}))
     return rows
 
 
-def _custom(kind: raw, command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
+def _process_raw(kind: raw, command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
     try:
-        return kind.serializer([SimpleNamespace(**values) for _, values in lines], objects)
+        return kind.serializer([SimpleNamespace(**coerce(kind.types, values)) for _, values in lines], objects)
     except (TypeError, ValueError) as exc:
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
-def _apply(kind: each, command: str, cast: Cast, lines: Lines, objects: dict[str, Any]) -> None:
+def _process_each(kind: each, command: str, lines: Lines, objects: dict[str, Any]) -> None:
     if kind.default is not None:
         objects[command] = kind.default()  # keyed by the command name; a fresh instance per parse
     for number, values in lines:
-        with _located(number):
-            row = SimpleNamespace(**{key: cast(key, value, objects) for key, value in values.items()})
+        with exc_handler(number):
+            row = SimpleNamespace(**coerce(kind.types, values))
             kind.handler(objects, row)
-
-
-def _grammar_fields(grammar: str, commands: Sequence[str]) -> dict[str, list[str]]:
-    sub_grammars = _sub_grammars(grammar)
-    if unknown := set(commands) - sub_grammars.keys():
-        raise ValueError(en.NOT_IN_GRAMMAR.format(commands=sorted(unknown)))
-    return {command: [f.replace("-", "_") for f in dict.fromkeys(re.findall(r"<([\w-]+)>", sub_grammars[command]))] for command in commands}
-
-
-def _sub_grammars(grammar: str) -> dict[str, str]:
-    patterns: dict[str, list[str]] = {}
-    for pattern in filter(None, (line.strip() for line in grammar.splitlines())):
-        patterns.setdefault(pattern.split()[0], []).append(pattern)
-    if hyphenated := sorted(command for command in patterns if "-" in command):
-        raise ValueError(en.COMMAND_HYPHEN.format(commands=hyphenated))
-    sub_grammars = {command: "Usage: " + "\n".join(lines) for command, lines in patterns.items()}
-    for command, sub_grammar in sub_grammars.items():
-        spellings: dict[str, set[str]] = {}
-        for token in re.findall(r"--[\w-]+(?:=<[\w-]+>)?|<[\w-]+>", sub_grammar):
-            spelling = token.split("=")[0]  # an option's =<arg> placeholder names the option, not a positional
-            spellings.setdefault(spelling.strip("<>-").replace("-", "_"), set()).add(spelling)
-        for name, tokens in spellings.items():
-            if len(tokens) > 1:
-                raise ValueError(en.KEY_COLLISION.format(command=command, tokens=sorted(tokens), key=name))
-    return sub_grammars
-
-
-def _parse(line: str, sub_grammars: Mapping[str, str], previous: Sequence[str] = ()) -> SimpleNamespace | None:
-    tokens = shlex.split(line, comments=True)
-
-    if not tokens:
-        return None
-    if any(token == "." and i >= len(previous) for i, token in enumerate(tokens) if i):
-        raise ValueError(en.DITTO_NOTHING_ABOVE)
-    tokens = [previous[i] if token == "." and i else token for i, token in enumerate(tokens)]
-
-    if (sub_grammar := sub_grammars.get(tokens[0])) is None:
-        raise ValueError(en.UNKNOWN_COMMAND.format(command=tokens[0], commands=sorted(sub_grammars)))
-    try:
-        parsed = docopt("\n  ".join(sub_grammar.splitlines()), argv=tokens[1:])
-    except DocoptExit:
-        raise ValueError(en.NO_MATCH.format(line=line.strip(), sub_grammar=sub_grammar.strip())) from None
-    values = {key.strip("<>-").replace("-", "_"): value for key, value in parsed.items()}
-    return SimpleNamespace(command=tokens[0], tokens=tokens, values=values)

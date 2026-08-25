@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -13,6 +14,8 @@ round <name> <player> <result>
 game define <name> <start> <duration>
 game append <name> <player> <sets>
 """
+
+TYPES = {"str": str, "int": int, "float": float}
 
 FIXTURE = Path(__file__).parent / "fixture"
 
@@ -93,6 +96,50 @@ def test_parse_rejects_duplicate_scalar_key():
         parse("setting surface clay\nsetting surface grass", GRAMMAR, serializers={"setting": scalar(dict)})
 
 
+def test_scalar_types_coerce_by_key():
+    objects = parse(
+        "setting surface clay\nsetting best_of 5",
+        GRAMMAR,
+        serializers={"setting": scalar(dict, types={"best_of": int})},
+    )
+    assert objects["setting"] == {"surface": "clay", "best_of": 5}
+
+
+def test_scalar_types_default_to_str_for_unlisted_keys():
+    objects = parse("setting surface clay", GRAMMAR, serializers={"setting": scalar(dict, types={"best_of": int})})
+    assert objects["setting"] == {"surface": "clay"}
+
+
+def test_group_types_coerce_by_field_name():
+    objects = parse("round q Alcaraz 6", GRAMMAR, serializers={"round": group(dict, types={"result": int})})
+    assert objects["round"] == {"q": [{"player": "Alcaraz", "result": 6}]}
+
+
+def test_array_types_coerce_by_field_name():
+    objects = parse("game append Final Alcaraz 3", GRAMMAR, serializers={"game": array(dict, types={"sets": int})})
+    assert objects["game"] == [{"name": "Final", "player": "Alcaraz", "sets": 3, "append": True, "define": False}]
+
+
+def test_each_types_coerce_before_the_handler_runs():
+    seen = []
+    objects = parse(
+        "round q Alcaraz 6",
+        GRAMMAR,
+        serializers={"round": each(lambda objects, row: seen.append((row.result, type(row.result))), types={"result": int})},
+    )
+    assert seen == [(6, int)]
+    assert objects == {}
+
+
+def test_raw_types_coerce_the_rows_it_collates():
+    objects = parse(
+        "round q Alcaraz 6",
+        GRAMMAR,
+        serializers={"round": raw(lambda rows, objects: [vars(r) for r in rows], types={"result": int})},
+    )
+    assert objects["round"] == [{"name": "q", "player": "Alcaraz", "result": 6}]
+
+
 def test_parse_rejects_wrong_scalar_field_count():
     with pytest.raises(
         ValueError,
@@ -135,6 +182,42 @@ def test_parse_rejects_grammar_names_that_normalize_identically(grammar):
 @pytest.mark.parametrize("grammar", ["pick [--set=<set>]", "pick <n> [--set=<v>]"])
 def test_parse_allows_option_argument_placeholder(grammar):
     parse("", grammar, serializers={"pick": array(dict)})
+
+
+def test_typed_placeholder_coerces_value():
+    objects = parse("match Alcaraz 3", "match <winner> <sets:int>", serializers={"match": array(dict)}, types=TYPES)
+    assert objects["match"] == [{"winner": "Alcaraz", "sets": 3}]
+
+
+def test_untyped_placeholder_defaults_to_str():
+    objects = parse("match Alcaraz 3", "match <winner> <sets>", serializers={"match": array(dict)})
+    assert objects["match"] == [{"winner": "Alcaraz", "sets": "3"}]
+
+
+def test_typed_option_argument_coerces_the_options_own_key():
+    objects = parse("pick --set=3", "pick [--set=<v:int>]", serializers={"pick": array(dict)}, types=TYPES)
+    assert objects["pick"] == [{"set": 3}]
+
+
+def test_bad_typed_value_carries_line_number():
+    with pytest.raises(ConfigError, match=re.escape("line 1: invalid literal for int() with base 10: 'best'")):
+        parse("match Alcaraz best", "match <winner> <sets:int>", serializers={"match": array(dict)}, types=TYPES)
+
+
+def test_parse_rejects_unknown_placeholder_type():
+    with pytest.raises(
+        ValueError,
+        match=re.escape("pick grammar: unknown type 'bool' for 'flag' — use one of ['float', 'int', 'str']"),
+    ):
+        parse("", "pick <flag:bool>", serializers={"pick": array(dict)}, types=TYPES)
+
+
+def test_parse_rejects_inconsistent_types_for_the_same_field():
+    with pytest.raises(
+        ValueError,
+        match=re.escape("pick grammar: ['<n:int>', '<n:str>'] normalize to the same key 'n' — rename the option or the positional"),
+    ):
+        parse("", "pick <n:int>\npick go <n:str>", serializers={"pick": array(dict)}, types=TYPES)
 
 
 def test_parse_rejects_bare_callable():
@@ -227,52 +310,6 @@ def test_raw_serializer_collates_its_rows():
     assert objects == {"round": ["Alcaraz"]}
 
 
-def test_cast_resolves_names_against_earlier_objects():
-    def cast(key, value, objects):
-        if key == "winner" and not any(value == row["player"] for rows in objects["round"].values() for row in rows):
-            raise ValueError(f"unknown player {value!r}")
-        return value
-
-    objects = parse(
-        "round quarterfinal Alcaraz\nmatch Alcaraz",
-        "round <name> <player>\nmatch <winner>",
-        serializers={"round": group(dict), "match": array(dict)},
-        cast=cast,
-    )
-    assert objects["match"] == [{"winner": "Alcaraz"}]
-
-
-def test_cast_lookup_failure_carries_line_number():
-    def cast(key, value, objects):
-        if key == "winner" and not any(value == row["player"] for rows in objects["round"].values() for row in rows):
-            raise ValueError(f"unknown player {value!r}")
-        return value
-
-    with pytest.raises(ConfigError, match=re.escape("line 2: unknown player 'Zverev'")):
-        parse(
-            "round quarterfinal Alcaraz\nmatch Zverev",
-            "round <name> <player>\nmatch <winner>",
-            serializers={"round": group(dict), "match": array(dict)},
-            cast=cast,
-        )
-
-
-def test_serializers_run_in_dict_order_and_cast_sees_prior_objects():
-    seen = []
-
-    def cast(key, value, objects):
-        seen.append((key, sorted(objects)))
-        return value
-
-    parse(
-        "setting surface grass\nround quarterfinal Alcaraz\nmatch Alcaraz",
-        "setting <key> <value>\nround <name> <player>\nmatch <winner>",
-        serializers={"setting": scalar(dict), "round": group(dict), "match": array(dict)},
-        cast=cast,
-    )
-    assert sorted(seen) == [("key", []), ("name", ["setting"]), ("player", ["setting"]), ("value", []), ("winner", ["round", "setting"])]
-
-
 def test_raw_serializer_receives_objects_built_so_far():
     objects = parse(
         "round quarterfinal Alcaraz\nchampion Alcaraz",
@@ -282,30 +319,30 @@ def test_raw_serializer_receives_objects_built_so_far():
     assert objects["champion"] == ("Alcaraz", ["round"])
 
 
-def test_each_runs_handler_per_line_with_cast_fields():
-    def upper(key, value, objects):
-        return value.upper() if key == "player" else value
+def test_each_runs_handler_per_line():
+    players = defaultdict(list)
 
     def collect(objects, row):
-        objects.setdefault("players", []).append(row.player)
+        players["players"].append(row.player)
 
-    objects = parse(
+    parse(
         "round r Alcaraz w\nround r Djokovic l",
         "round <name> <player> <result>",
         serializers={"round": each(collect)},
-        cast=upper,
     )
-    assert objects == {"players": ["ALCARAZ", "DJOKOVIC"]}
+    assert players == {"players": ["Alcaraz", "Djokovic"]}
 
 
 def test_each_sees_earlier_objects_and_locates_handler_error():
+    wins = defaultdict(list)
+
     def register(objects, row):
         objects.setdefault("known", set()).add(row.player)
 
     def check(objects, row):
         if row.winner not in objects["known"]:
             raise ValueError(f"unknown player {row.winner!r}")
-        objects.setdefault("wins", []).append(row.winner)
+        wins["wins"].append(row.winner)
 
     with pytest.raises(ConfigError, match=re.escape("line 3: unknown player 'Sinner'")):
         parse(

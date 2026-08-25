@@ -13,11 +13,12 @@ RESERVED_FIELDS = (
 ARRAY_FIELDS = "array command {command!r} takes at least 1 field, grammar has none — add '<field>'s to its grammar line"
 NOT_IN_GRAMMAR = "commands not in grammar: {commands} — add a grammar line starting with each or remove them from serializers"
 KEY_COLLISION = "{command} grammar: {tokens} normalize to the same key {key!r} — rename the option or the positional"
+UNKNOWN_TYPE = "{command} grammar: unknown type {type!r} for {name!r} — use one of {types}"
 
 NO_SERIALIZER = "no serializer for {command!r} — add a {command!r} entry to serializers or delete the line"
 DITTO_NOTHING_ABOVE = "'.' repeats the token in this position from the previous line, which has none — type the token out"
 UNKNOWN_COMMAND = "unknown command {command!r} — no grammar line starts with it; grammar has {commands}"
-NO_MATCH = "{line!r} does not match {sub_grammar!r}"
+NO_MATCH = "{line!r} does not match {docopt_grammar!r}"
 
 DUPLICATE_KEY = "duplicate {command} {key!r} — delete this line or change its key"
 UNKNOWN_GROUP = "unknown {command} group {name!r} — add '{command} define {name} ...' on an earlier line"
