@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "command-cfg"
-version = "0.5.0"
+version = "0.6.0"
 requires-python = ">=3.14"
 dependencies = [
     "docopt-ng>=0.9.0",
@@ -13,22 +13,16 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest",
-    "black",
-    "isort",
+    "ruff",
     "mypy",
-    "pyflakes",
 ]
 
-[tool.black]
+[tool.ruff]
 line-length = 140
-target-version = ["py314"]
+target-version = "py314"
 
-[tool.isort]
-profile = "black"
-
-[tool.flake8]
-max-line-length = 140
-extend-ignore = ["E203", "W503"]
+[tool.ruff.lint]
+select = ["E", "F", "I"]
 
 [tool.mypy]
 python_version = "3.14"
