@@ -39,12 +39,15 @@ not `"3"`. A bare `<field>` stays `str`.
 Every kind also takes its own `types` mapping as a per-field override — keyed
 straight to a callable, not a name to look up — defaulting to `{"str": str, "int":
 int, "float": float}` for every field that isn't overridden. For `group`/`array`/
-`each`/`raw` it's keyed by field name, same as `<field:type>`. `scalar`'s
-`<key> <value>` line has one `<value>` placeholder shared by every row, so its
-`types` is keyed by each row's `key` instead — `scalar(Settings, types={"best_of":
-int})` types `best_of` as `int`, every other setting stays `str`. The mapping lives
-only on that command's own `scalar(...)`/`group(...)`/etc. instance — it's not
-global, so it can't affect any other command.
+`each`/`raw` it's keyed by field name, same as `<field:type>`, and each caster runs
+as plain `caster(value)`. `scalar`'s `<key> <value>` line has one `<value>`
+placeholder shared by every row, so its `types` is keyed by each row's `key`
+instead — `scalar(Settings, types={"best_of": int})` types `best_of` as `int`,
+every other setting stays `str` — and each caster runs as `caster(value, objects)`,
+so a scalar's own casters can resolve or validate against commands parsed earlier
+too, the same access `raw`/`each` get. The mapping lives only on that command's own
+`scalar(...)`/`group(...)`/etc. instance — it's not global, so it can't affect any
+other command.
 
 `Parser(grammar, serializers, types={})` validates the grammar and every kind's
 `types` once; `.parse(text)` reuses that setup across repeated parses — useful
@@ -165,7 +168,7 @@ class Parser:
                 case each():
                     _process_each(kind, command, lines, objects)
                 case scalar():
-                    objects[command] = _process_scalar(kind, self.fields[command], command, lines) if lines else None
+                    objects[command] = _process_scalar(kind, self.fields[command], command, lines, objects) if lines else None
                 case group():
                     objects[command] = _process_group(kind, self.fields[command][0], command, lines)
                 case array():
@@ -204,15 +207,18 @@ def _fields(docopt_grammars: Mapping[str, str], serializers: Mapping[str, scalar
     return fields
 
 
-def _process_scalar(kind: scalar, fields: Sequence[str], command: str, lines: Lines) -> Any:
+def _default_cast(value: str, objects: Mapping[str, Any]) -> str:
+    return value
+
+
+def _process_scalar(kind: scalar, fields: Sequence[str], command: str, lines: Lines, objects: Mapping[str, Any]) -> Any:
     key, value = fields
     pairs: dict[Any, Any] = {}
     for number, values in lines:
         with exc_handler(number):
             if (key_value := values[key]) in pairs:
                 raise ValueError(en.DUPLICATE_KEY.format(command=command, key=key_value))
-            raw_value = values[value]
-            pairs[key_value] = kind.types.get(key_value, str)(raw_value) if isinstance(raw_value, str) else raw_value
+            pairs[key_value] = kind.types.get(key_value, _default_cast)(values[value], objects)
     try:
         return kind.factory(**pairs)
     except (TypeError, ValueError) as exc:

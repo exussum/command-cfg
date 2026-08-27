@@ -18,7 +18,10 @@ _PLACEHOLDER = re.compile(r"<([\w-]+)(?::([\w-]+))?>")
 def grammar_fields(docopt_grammars: Mapping[str, str], commands: Sequence[str]) -> dict[str, list[str]]:
     if unknown := set(commands) - docopt_grammars.keys():
         raise ValueError(en.NOT_IN_GRAMMAR.format(commands=sorted(unknown)))
-    return {command: [f.replace("-", "_") for f in dict.fromkeys(re.findall(r"<([\w-]+)(?::[\w-]+)?>", docopt_grammars[command]))] for command in commands}
+    return {
+        command: [f.replace("-", "_") for f in dict.fromkeys(re.findall(r"<([\w-]+)(?::[\w-]+)?>", docopt_grammars[command]))]
+        for command in commands
+    }
 
 
 def docopt_grammars(
@@ -50,7 +53,7 @@ def _field_types(command: str, docopt_grammar: str, types: Mapping[str, Callable
     return field_types
 
 
-def coerce(field_types: Mapping[str, Callable[[Any], Any]], values: Mapping[str, Any]) -> dict[str, Any]:
+def coerce(field_types: Mapping[str, Callable[..., Any]], values: Mapping[str, Any]) -> dict[str, Any]:
     return {key: field_types.get(key, str)(value) if isinstance(value, str) else value for key, value in values.items()}
 
 
@@ -58,12 +61,16 @@ def _resolve_token(token: str) -> tuple[str, str, str | None]:
     if "=" in token:
         flag, _, placeholder = token.partition("=")  # an option's =<arg> placeholder names the option, not a positional
         name = _key_name(flag)
-        type_name = _PLACEHOLDER.fullmatch(placeholder).group(2)
-        return name, flag, type_name
+        match = _PLACEHOLDER.fullmatch(placeholder)
+        assert match is not None
+        return name, flag, match.group(2)
     else:
         name = _key_name(token)
-        type_name = _PLACEHOLDER.fullmatch(token).group(2) if token.startswith("<") else None
-        return name, token, type_name
+        if not token.startswith("<"):
+            return name, token, None
+        match = _PLACEHOLDER.fullmatch(token)
+        assert match is not None
+        return name, token, match.group(2)
 
 
 def parse_line(line: str, docopt_grammars: Mapping[str, str], previous: Sequence[str] = ()) -> SimpleNamespace | None:
@@ -87,5 +94,7 @@ def parse_line(line: str, docopt_grammars: Mapping[str, str], previous: Sequence
 
 def _key_name(key: str) -> str:
     if key.startswith("<"):
-        return _PLACEHOLDER.fullmatch(key).group(1).replace("-", "_")
+        match = _PLACEHOLDER.fullmatch(key)
+        assert match is not None
+        return match.group(1).replace("-", "_")
     return key.strip("<>-").replace("-", "_")

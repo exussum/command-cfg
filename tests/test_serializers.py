@@ -20,6 +20,10 @@ TYPES = {"str": str, "int": int, "float": float}
 FIXTURE = Path(__file__).parent / "fixture"
 
 
+def _int(value, objects):
+    return int(value)
+
+
 @dataclass
 class Settings:
     surface: str
@@ -100,13 +104,13 @@ def test_scalar_types_coerce_by_key():
     objects = parse(
         "setting surface clay\nsetting best_of 5",
         GRAMMAR,
-        serializers={"setting": scalar(dict, types={"best_of": int})},
+        serializers={"setting": scalar(dict, types={"best_of": _int})},
     )
     assert objects["setting"] == {"surface": "clay", "best_of": 5}
 
 
 def test_scalar_types_default_to_str_for_unlisted_keys():
-    objects = parse("setting surface clay", GRAMMAR, serializers={"setting": scalar(dict, types={"best_of": int})})
+    objects = parse("setting surface clay", GRAMMAR, serializers={"setting": scalar(dict, types={"best_of": _int})})
     assert objects["setting"] == {"surface": "clay"}
 
 
@@ -144,7 +148,8 @@ def test_parse_rejects_wrong_scalar_field_count():
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "scalar command 'round' takes exactly 2 fields, grammar has ['name', 'player', 'result'] — grammar must be 'round <key> <value>'; more fields needs group or array"
+            "scalar command 'round' takes exactly 2 fields, grammar has ['name', 'player', 'result'] — grammar must be "
+            "'round <key> <value>'; more fields needs group or array"
         ),
     ):
         parse("", GRAMMAR, serializers={"round": scalar(dict)})
@@ -154,7 +159,8 @@ def test_parse_rejects_too_few_grouped_fields():
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "group command 'solo' takes at least 2 fields, grammar has ['name'] — add row fields after the group key: 'solo <name> <field>...'"
+            "group command 'solo' takes at least 2 fields, grammar has ['name'] — add row fields after the group key: "
+            "'solo <name> <field>...'"
         ),
     ):
         parse("", "solo <name>", serializers={"solo": group(dict)})
@@ -223,7 +229,9 @@ def test_parse_rejects_inconsistent_types_for_the_same_field():
 def test_parse_rejects_bare_callable():
     with pytest.raises(
         ValueError,
-        match=re.escape("serializers must be scalar/group/array/raw/each: ['setting'] are unwrapped — write scalar(Settings), not Settings"),
+        match=re.escape(
+            "serializers must be scalar/group/array/raw/each: ['setting'] are unwrapped — write scalar(Settings), not Settings"
+        ),
     ):
         parse("", GRAMMAR, serializers={"setting": dict})
 
