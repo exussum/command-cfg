@@ -1,0 +1,3 @@
+seed A${P:-x} 1
+seed B${P-x}  2
+seed '${CHAMP:-Big Cat}' 3

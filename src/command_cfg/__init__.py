@@ -49,11 +49,19 @@ too, the same access `raw`/`each` get. The mapping lives only on that command's 
 `scalar(...)`/`group(...)`/etc. instance — it's not global, so it can't affect any
 other command.
 
+Tokens may interpolate variables when a `variables` mapping is passed:
+`${NAME}` becomes `variables["NAME"]` (an unknown name errors with its line
+number), and `${NAME-default}` / `${NAME:-default}` fall back bash-style — when
+`NAME` is missing, or missing-or-empty, respectively — so a config can carry its
+own literal as the default: `setting jobs_db ${JOBS_DB:-sqlite:///var/jobs.sqlite}`.
+Expansion runs per token after quoting, so `'${MOTTO:-hello world}'` stays one
+token. Without `variables` (the default), `${...}` is ordinary text.
+
 `Parser(grammar, serializers, types={})` validates the grammar and every kind's
 `types` once; `.parse(text)` reuses that setup across repeated parses — useful
-when many texts share one grammar. `parse(text, grammar, serializers, types={})`
-is a one-line convenience for a single parse, equivalent to
-`Parser(grammar, serializers, types).parse(text)`.
+when many texts share one grammar. `parse(text, grammar, serializers, types={},
+variables=None)` is a one-line convenience for a single parse, equivalent to
+`Parser(grammar, serializers, types, variables).parse(text)`.
 
 from collections import namedtuple
 
@@ -141,10 +149,12 @@ class Parser:
         grammar: str,
         serializers: Mapping[str, scalar | group | array | raw | each],
         types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
+        variables: Mapping[str, str] | None = None,
     ) -> None:
         self.serializers = serializers
         self.docopt_grammars, self.types = docopt_grammars(grammar, types)
         self.fields = _fields(self.docopt_grammars, serializers)
+        self.variables = variables
 
     def parse(self, text: str) -> dict[str, Any]:
         parsed_lines: defaultdict[str, Lines] = defaultdict(list)
@@ -152,7 +162,7 @@ class Parser:
         previous: list[str] = []
         for number, line in enumerate(text.splitlines(), 1):
             with exc_handler(number):
-                if parsed := parse_line(line, self.docopt_grammars, previous):
+                if parsed := parse_line(line, self.docopt_grammars, previous, self.variables):
                     if parsed.command not in self.serializers:
                         raise ValueError(en.NO_SERIALIZER.format(command=parsed.command))
                     values = coerce(self.types[parsed.command], parsed.values)
@@ -182,8 +192,9 @@ def parse(
     grammar: str,
     serializers: Mapping[str, scalar | group | array | raw | each],
     types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
+    variables: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    return Parser(grammar, serializers, types).parse(text)
+    return Parser(grammar, serializers, types, variables).parse(text)
 
 
 def _fields(docopt_grammars: Mapping[str, str], serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:

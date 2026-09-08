@@ -25,6 +25,7 @@ KEY_COLLISION = "{command} grammar: {tokens} normalize to the same key {key!r} �
 UNKNOWN_TYPE = "{command} grammar: unknown type {type!r} for {name!r} — use one of {types}"
 
 NO_SERIALIZER = "no serializer for {command!r} — add a {command!r} entry to serializers or delete the line"
+UNSET_VARIABLE = "${{{name}}} has no value — add {name!r} to variables or write a default: ${{{name}:-default}}"
 DITTO_NOTHING_ABOVE = "'.' repeats the token in this position from the previous line, which has none — type the token out"
 UNKNOWN_COMMAND = "unknown command {command!r} — no grammar line starts with it; grammar has {commands}"
 NO_MATCH = "{line!r} does not match {docopt_grammar!r}"

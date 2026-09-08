@@ -73,8 +73,30 @@ def _resolve_token(token: str) -> tuple[str, str, str | None]:
         return name, token, match.group(2)
 
 
-def parse_line(line: str, docopt_grammars: Mapping[str, str], previous: Sequence[str] = ()) -> SimpleNamespace | None:
+_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}")
+
+
+def expand(token: str, variables: Mapping[str, str]) -> str:
+    def sub(match: re.Match[str]) -> str:
+        name, operator, default = match.groups()
+        value = variables.get(name)
+        if operator is None:
+            if value is None:
+                raise ValueError(en.UNSET_VARIABLE.format(name=name))
+            return value
+        if value is None or (operator == ":-" and value == ""):
+            return default
+        return value
+
+    return _VARIABLE.sub(sub, token)
+
+
+def parse_line(
+    line: str, docopt_grammars: Mapping[str, str], previous: Sequence[str] = (), variables: Mapping[str, str] | None = None
+) -> SimpleNamespace | None:
     tokens = shlex.split(line, comments=True)
+    if variables is not None:
+        tokens = [expand(token, variables) for token in tokens]
 
     if not tokens:
         return None

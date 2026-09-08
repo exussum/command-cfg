@@ -19,7 +19,7 @@ umpire <name>
 FIXTURE = Path(__file__).parent / "fixture"
 
 
-def _parse(name):
+def _parse(name, variables=None):
     def record(rows, objects):
         for values in rows:
             rank = getattr(values, "rank", None)
@@ -27,7 +27,7 @@ def _parse(name):
                 raise ValueError(f"not a number: {rank!r}")
         return [vars(values) for values in rows]
 
-    objects = parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": raw(record), "match": raw(record)})
+    objects = parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": raw(record), "match": raw(record)}, variables=variables)
     return objects["seed"] + objects["match"]
 
 
@@ -77,6 +77,25 @@ def _parse(name):
 )
 def test_parse(name, expected):
     assert _parse(name) == expected
+
+
+@pytest.mark.parametrize(
+    "variables,players",
+    [
+        (None, ["A${P:-x}", "B${P-x}", "${CHAMP:-Big Cat}"]),
+        ({}, ["Ax", "Bx", "Big Cat"]),
+        ({"P": ""}, ["Ax", "B", "Big Cat"]),
+        ({"P": "lcaraz", "CHAMP": "Sinner"}, ["Alcaraz", "Blcaraz", "Sinner"]),
+    ],
+)
+def test_interpolate(variables, players):
+    assert [row["player"] for row in _parse("interpolate", variables)] == players
+
+
+def test_interpolate_unset():
+    message = "line 1: ${WHO} has no value — add 'WHO' to variables or write a default: ${WHO:-default}"
+    with pytest.raises(ConfigError, match="^" + re.escape(message) + "$"):
+        _parse("interpolate_unset", {})
 
 
 @pytest.mark.parametrize(
