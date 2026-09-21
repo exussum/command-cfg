@@ -1,11 +1,11 @@
 # command-cfg
 
-Line-oriented config files parsed against a docopt grammar, serialized into
-caller-owned objects.
+Line-oriented config files parsed against a docopt-style grammar, serialized
+into caller-owned objects.
 
 A config file is a sequence of command lines with shell-style quoting, `#`
 comments, and a `.` token that repeats the token in the same position on the
-line above. The grammar is one docopt usage pattern per line, its first word
+line above. The grammar is one docopt-style usage pattern per line, its first word
 the command name; each config line is matched against its command's patterns
 and dispatched to a serializer. A malformed line raises `ConfigError`
 carrying the offending line number.
@@ -20,26 +20,30 @@ kind:
 - `group(factory)` — a row factory, called once per line with the line's
   fields as kwargs; its rows are collected in dicts of lists keyed by the
   line's first field — the group key, also passed to the factory when
-  `include_key=True`. `define`/`append` grammar pairs hoist shared values:
-  `define` names a group and carries its parameters, `append` adds a row,
-  and every row carries the group's parameters merged in.
+  `include_key=True`.
 - `array(factory)` — a row factory whose rows collect in a flat list, in
   file order.
 - `raw(serializer)` — the escape hatch: called once per command with the
   list of its lines' parsed values and the objects built so far; whatever it
   returns is stored under the command name.
+- `each(handler, default=factory)` — called once per line as
+  `handler(objects, row)`. `default`, if given, seeds `objects[command]`
+  with a fresh `default()` before the lines run so the handler can mutate
+  it without a `setdefault`; without it, `each` claims no key and the
+  handler writes into `objects` wherever it wants.
 
 ## Example
 
 Every kind and file feature in one config — scalar pairs, a quoted token, a
-`#` comment, the `.` ditto token, a `define`/`append` group, array rows, a
-raw command, and a `cast` that resolves player names against the rounds so a
-typo errors out instead of silently naming a new player:
+`#` comment, the `.` ditto token, a group, a self-rolled `define`/`append`
+group built on `each`, array rows, and a raw command that resolves the
+champion's name against the rounds so a typo errors out instead of silently
+naming a new player:
 
 ```python
 from collections import namedtuple
 
-from command_cfg import array, group, parse, raw, scalar
+from command_cfg import array, each, group, load, raw, scalar
 
 CONFIG = """
 setting surface grass
@@ -72,29 +76,40 @@ Game = namedtuple("Game", "start player sets")
 Match = namedtuple("Match", "winner sets")
 
 
-def known(key, value, objects):
-    if key in ("winner", "player") and value is not None:
-        if not any(value == row.entrant for rows in objects["round"].values() for row in rows):
-            raise ValueError(f"unknown player {value!r}")
-    return value
-
 
 def champion(rows, objects):
+    # There's nothing to report _but_ the winner.  No frills result.
     [row] = rows
-    return known("player", row.player, objects)
+    if not any(row.player == entrant.entrant for rounds in objects["round"].values() for entrant in rounds):
+        raise ValueError(f"unknown player {row.player!r}")
+    return row.player
 
 
-objects = parse(
+game_starts: dict[str, str] = {}
+
+
+def game(objects, row):
+    groups = objects["game"]
+    if row.define:
+        # start here is the <start> variable, we can keep track that a game has
+        # started and everything rolls up into it.  So all finals can be returned
+        # all at once, keyed by their types
+        game_starts[row.id] = row.start
+        groups[row.id] = []
+    elif row.append:
+        groups[row.id].append(Game(game_starts[row.id], row.player, row.sets))
+
+
+objects = load(
     CONFIG,
     GRAMMAR,
     {
-        "setting": scalar(Settings),
-        "round": group(Round, include_key=True),
-        "game": group(Game),
+        "setting": scalar(Settings), # Settings and Match are easily constructed by passing in the data
         "match": array(Match),
+        "round": group(Round, include_key=True), # Grouping will prevent repeats off of the first entry.  including that key returns it so Round can get <name> back
+        "game": each(game, default=dict),
         "champion": raw(champion),
     },
-    cast=known,
 )
 assert objects == {
     "setting": Settings(surface="grass", best_of="5"),
@@ -106,18 +121,21 @@ assert objects == {
 ```
 
 Serializers run in their dict order, each seeing the objects earlier commands
-produced. The `cast(key, value, objects)` callable coerces values by field
-name before they reach any serializer — for type coercion (e.g. turning
-`<start>` into a `datetime.time`) or, as with `known` above, name lookups
-against earlier commands' objects.
+produced. Each kind's own `types` mapping coerces values by field name before
+they reach its factory (e.g. turning `<start>` into a `datetime.time`); `raw`
+and `each` also get `objects` directly, so their own code can do lookups
+against earlier commands' objects, as `known` does above.
 
 ## Development
 
 ```sh
 uv run pytest
-uv run black src tests
+uv run ruff format
+uv run ruff check
 uv run mypy
 ```
+
+`pre-commit run --all-files` runs all of the above (plus `uv lock`/pylock/pip-audit regeneration) in one pass — the same checks CI runs.
 
 ## Publishing
 

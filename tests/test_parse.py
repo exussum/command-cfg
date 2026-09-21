@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import command_cfg
-from command_cfg import ConfigError, parse, raw
+from command_cfg import ConfigError, load, raw
 
 GRAMMAR = """
 seed <player> <rank>
@@ -27,7 +27,7 @@ def _parse(name, variables=None):
                 raise ValueError(f"not a number: {rank!r}")
         return [vars(values) for values in rows]
 
-    objects = parse((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": raw(record), "match": raw(record)}, variables=variables)
+    objects = load((FIXTURE / f"{name}.ccfg").read_text(), GRAMMAR, {"seed": raw(record), "match": raw(record)}, variables=variables)
     return objects["seed"] + objects["match"]
 
 
@@ -102,7 +102,7 @@ def test_interpolate_unset():
     "name,message",
     [
         ("unknown_command", "line 2: unknown command 'rank' — no grammar line starts with it; grammar has ['match', 'seed', 'umpire']"),
-        ("usage_mismatch", "line 1: 'seed Alcaraz' does not match 'Usage: seed <player> <rank>'"),
+        ("usage_mismatch", "line 1: seed ['Alcaraz'] does not match — Unexpected end-of-input. Expected one of: \n\t* VALUE"),
         ("ditto_no_previous", "line 1: '.' repeats the token in this position from the previous line, which has none — type the token out"),
         ("ditto_command", "line 2: unknown command '.' — no grammar line starts with it; grammar has ['match', 'seed', 'umpire']"),
         ("no_serializer", "line 1: no serializer for 'umpire' — add a 'umpire' entry to serializers or delete the line"),

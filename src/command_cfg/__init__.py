@@ -1,8 +1,9 @@
-"""Line-oriented config files parsed against a docopt grammar, serialized into caller-owned objects.
+"""Line-oriented config files parsed against a docopt-shaped grammar, serialized into caller-owned objects.
 
 A config file is a sequence of command lines with shell-style quoting, `#` comments,
 and a `.` token repeating the token in the same position on the line above. The
-grammar is one docopt usage pattern per line, first word the command name; each
+grammar is one docopt-style usage pattern per line, first word the command name;
+each pattern is compiled into a Lark grammar (see `command_cfg.grammar`), and each
 config line matches its command's patterns and dispatches to a serializer. A
 malformed line raises ConfigError with the offending line number.
 
@@ -18,34 +19,28 @@ field — the group key, also passed to the factory when `include_key=True`.
 `raw(serializer)`: the escape hatch, called once per command with the list of its
 lines' parsed values plus the objects built so far, whatever it returns stored
 under the command name. `each(handler, default=factory)`: called once per line as
-`handler(objects, row)`, `row`'s fields already coerced per `<field:type>`/`types`.
-`default`, if given, seeds `objects[command]` with a fresh `default()` before the
-lines run so the handler can mutate it without a `setdefault`; without it, `each`
-claims no key and the handler writes into `objects` wherever it wants. Command
-names key the result, so they may not contain `-` (use `_`); only field names
-normalize `-` to `_`.
+`handler(objects, row)`, `row`'s fields already coerced per `types`. `default`, if
+given, seeds `objects[command]` with a fresh `default()` before the lines run so
+the handler can mutate it without a `setdefault`; without it, `each` claims no key
+and the handler writes into `objects` wherever it wants. Command names key the
+result, so they may not contain `-` (use `_`); only field names normalize `-` to
+`_`.
 
 Serializers run in dict order, each seeing the objects earlier commands produced:
 `raw` and `each` get `objects` directly, so they can resolve or validate a value
 against commands parsed earlier. Below, `known` rejects any champion who never
 entered a round — a typo errors out instead of silently naming a new player.
 
-A placeholder can name its type as `<field:type>`, converted before the value
-reaches a factory. There's no built-in type table — `type` is looked up in the
-`types` mapping passed to `Parser`/`parse`, so `Parser(GRAMMAR, serializers,
-types={"int": int})` is what makes `<sets:int>` below turn `Match.sets` into `3`,
-not `"3"`. A bare `<field>` stays `str`.
-
-Every kind also takes its own `types` mapping as a per-field override — keyed
-straight to a callable, not a name to look up — defaulting to `{"str": str, "int":
-int, "float": float}` for every field that isn't overridden. For `group`/`array`/
-`each`/`raw` it's keyed by field name, same as `<field:type>`, and each caster runs
-as plain `caster(value)`. `scalar`'s `<key> <value>` line has one `<value>`
-placeholder shared by every row, so its `types` is keyed by each row's `key`
-instead — `scalar(Settings, types={"best_of": int})` types `best_of` as `int`,
-every other setting stays `str` — and each caster runs as `caster(value, objects)`,
-so a scalar's own casters can resolve or validate against commands parsed earlier
-too, the same access `raw`/`each` get. The mapping lives only on that command's own
+Every kind takes its own `types` mapping as a per-field override — keyed straight
+to a callable, not a name to look up — defaulting to `{"str": str, "int": int,
+"float": float}` for every field that isn't overridden. For `group`/`array`/`each`/
+`raw` it's keyed by field name, and each caster runs as plain `caster(value)`.
+`scalar`'s `<key> <value>` line has one `<value>` placeholder shared by every row,
+so its `types` is keyed by each row's `key` instead — `scalar(Settings,
+types={"best_of": int})` types `best_of` as `int`, every other setting stays `str`
+— and each caster runs as `caster(value, objects)`, so a scalar's own casters can
+resolve or validate against commands parsed earlier too, the same access
+`raw`/`each` get. The mapping lives only on that command's own
 `scalar(...)`/`group(...)`/etc. instance — it's not global, so it can't affect any
 other command.
 
@@ -57,11 +52,11 @@ own literal as the default: `setting jobs_db ${JOBS_DB:-sqlite:///var/jobs.sqlit
 Expansion runs per token after quoting, so `'${MOTTO:-hello world}'` stays one
 token. Without `variables` (the default), `${...}` is ordinary text.
 
-`Parser(grammar, serializers, types={})` validates the grammar and every kind's
-`types` once; `.parse(text)` reuses that setup across repeated parses — useful
-when many texts share one grammar. `parse(text, grammar, serializers, types={},
-variables=None)` is a one-line convenience for a single parse, equivalent to
-`Parser(grammar, serializers, types, variables).parse(text)`.
+`Parser(grammar, serializers)` validates the grammar and every kind's `types`
+once; `.load(text)` reuses that setup across repeated parses — useful when many
+texts share one grammar. `load(text, grammar, serializers, variables=None)` is a
+one-line convenience for a single parse, equivalent to `Parser(grammar,
+serializers, variables).load(text)`.
 
 from collections import namedtuple
 
@@ -80,7 +75,7 @@ champion Alcaraz
 GRAMMAR = '''
 setting <key> <value>
 round <name> <entrant>
-match <winner> <sets:int>
+match <winner> <sets>
 champion <player>
 '''
 
@@ -105,11 +100,10 @@ objects = Parser(
     {
         "setting": scalar(Settings),
         "round": group(Round, include_key=True),
-        "match": array(Match),
+        "match": array(Match, types={"sets": int}),
         "champion": raw(champion),
     },
-    types={"int": int},
-).parse(CONFIG)
+).load(CONFIG)
 assert objects == {
     "setting": Settings(surface="grass"),
     "round": {"quarterfinal": [Round("quarterfinal", "Alcaraz"), Round("quarterfinal", "Djokovic")]},
@@ -119,14 +113,15 @@ assert objects == {
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 from command_cfg import en
+from command_cfg.grammar import CommandGrammar
 from command_cfg.models import array, each, group, raw, scalar
-from command_cfg.parser import coerce, docopt_grammars, grammar_fields, parse_line
+from command_cfg.parser import coerce, grammar_fields, grammars_by_command, parse_line
 
 Lines = list[tuple[int, dict[str, Any]]]
 
@@ -148,25 +143,23 @@ class Parser:
         self,
         grammar: str,
         serializers: Mapping[str, scalar | group | array | raw | each],
-        types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
         variables: Mapping[str, str] | None = None,
     ) -> None:
         self.serializers = serializers
-        self.docopt_grammars, self.types = docopt_grammars(grammar, types)
-        self.fields = _fields(self.docopt_grammars, serializers)
+        self.grammars: dict[str, CommandGrammar] = grammars_by_command(grammar)
+        self.fields = _fields(self.grammars, serializers)
         self.variables = variables
 
-    def parse(self, text: str) -> dict[str, Any]:
+    def load(self, text: str) -> dict[str, Any]:
         parsed_lines: defaultdict[str, Lines] = defaultdict(list)
 
         previous: list[str] = []
         for number, line in enumerate(text.splitlines(), 1):
             with exc_handler(number):
-                if parsed := parse_line(line, self.docopt_grammars, previous, self.variables):
+                if parsed := parse_line(line, self.grammars, previous, self.variables):
                     if parsed.command not in self.serializers:
                         raise ValueError(en.NO_SERIALIZER.format(command=parsed.command))
-                    values = coerce(self.types[parsed.command], parsed.values)
-                    parsed_lines[parsed.command].append((number, values))
+                    parsed_lines[parsed.command].append((number, parsed.values))
                     previous = parsed.tokens
 
         objects: dict[str, Any] = {}
@@ -180,29 +173,28 @@ class Parser:
                 case scalar():
                     objects[command] = _process_scalar(kind, self.fields[command], command, lines, objects) if lines else None
                 case group():
-                    objects[command] = _process_group(kind, self.fields[command][0], command, lines)
+                    objects[command] = _process_group(kind, self.fields[command][0], lines)
                 case array():
                     objects[command] = _process_array(kind, lines)
 
         return objects
 
 
-def parse(
+def load(
     text: str,
     grammar: str,
     serializers: Mapping[str, scalar | group | array | raw | each],
-    types: Mapping[str, Callable[[str], Any]] = MappingProxyType({}),
     variables: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    return Parser(grammar, serializers, types, variables).parse(text)
+    return Parser(grammar, serializers, variables).load(text)
 
 
-def _fields(docopt_grammars: Mapping[str, str], serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:
+def _fields(grammars: Mapping[str, CommandGrammar], serializers: Mapping[str, scalar | group | array | raw | each]) -> dict[str, list[str]]:
     if bare := sorted(command for command, kind in serializers.items() if not isinstance(kind, (scalar, group, array, raw, each))):
         raise ValueError(en.UNWRAPPED.format(commands=bare))
 
     kinds = {command: kind for command, kind in serializers.items() if not isinstance(kind, (raw, each))}
-    fields = grammar_fields(docopt_grammars, tuple(kinds))
+    fields = grammar_fields(grammars, tuple(kinds))
 
     for command, kind in kinds.items():
         match kind:
@@ -210,8 +202,6 @@ def _fields(docopt_grammars: Mapping[str, str], serializers: Mapping[str, scalar
                 raise ValueError(en.SCALAR_FIELDS.format(command=command, fields=fields[command]))
             case group() if len(fields[command]) < 2:
                 raise ValueError(en.GROUP_FIELDS.format(command=command, fields=fields[command]))
-            case group() if reserved := {"define", "append"} & set(fields[command]):
-                raise ValueError(en.RESERVED_FIELDS.format(command=command, reserved=sorted(reserved)))
             case array() if not fields[command]:
                 raise ValueError(en.ARRAY_FIELDS.format(command=command))
 
@@ -236,25 +226,15 @@ def _process_scalar(kind: scalar, fields: Sequence[str], command: str, lines: Li
         raise ConfigError(en.COMMAND_ERROR.format(command=command, error=exc)) from None
 
 
-def _process_group(kind: group, key_field: str, command: str, lines: Lines) -> dict[Any, list[Any]]:
+def _process_group(kind: group, key_field: str, lines: Lines) -> dict[Any, list[Any]]:
     groups: defaultdict[Any, list[Any]] = defaultdict(list)
-    params: dict[Any, dict[str, Any]] = {}
     for number, values in lines:
         with exc_handler(number):
             vals = dict(coerce(kind.types, values))
-            define, append = vals.pop("define", False), vals.pop("append", False)
             name = vals.pop(key_field)
             present = {key: value for key, value in vals.items() if value is not None}
             row_kwargs = {key_field: name, **present} if kind.include_key else present
-            if define:
-                params[name] = present
-                groups[name] = []
-            elif append:
-                if (defined := params.get(name)) is None:
-                    raise ValueError(en.UNKNOWN_GROUP.format(command=command, name=name))
-                groups[name].append(kind.factory(**defined, **row_kwargs))
-            else:
-                groups[name].append(kind.factory(**row_kwargs))
+            groups[name].append(kind.factory(**row_kwargs))
     return dict(groups)
 
 
