@@ -1,17 +1,17 @@
 """Compiles a docopt-style usage pattern (literals, <placeholders>, <placeholders>...,
-[optional] and (required) groups, --flag/--flag=<value> options) into a Lark grammar,
-and matches a config line's tokens against it — replacing docopt-ng with a real
-context-free parser so [optional] groups match as a connected whole instead of
-docopt's per-child independent matching (which let a bracketed argument absorb a
-stray token even when its sibling literal anchor wasn't present). A placeholder
-marked `...` collects one-or-more occurrences into a list instead of a scalar value;
-an absent `[<name>...]` defaults to an empty list, not None. The same applies to an
+[optional] groups, --flag/--flag=<value> options) into a Lark grammar, and matches a
+config line's tokens against it — replacing docopt-ng with a real context-free
+parser so [optional] groups match as a connected whole instead of docopt's
+per-child independent matching (which let a bracketed argument absorb a stray
+token even when its sibling literal anchor wasn't present). A placeholder marked
+`...` collects one-or-more occurrences into a list instead of a scalar value; an
+absent `[<name>...]` defaults to an empty list, not None. The same applies to an
 option marked `...` (`[--flag=<value>]...` or bare `--flag=<value>...`): repeated
 occurrences collect into a list, matching docopt-ng's behavior.
 
 Two separate Lark grammars are involved. `_PATTERN` parses the *fixed* pattern text
 itself (one specific token order, as the grammar author wrote it) into literals,
-placeholders, options, and bracket groups — that's a genuine context-free grammar,
+placeholders, options, and optional groups — that's a genuine context-free grammar,
 so it's Lark all the way down. Matching *actual config lines* against the compiled
 result is not: `--flag`s can appear in any order, interleaved anywhere among the
 required tokens, which isn't expressible as a CFG without either enumerating every
@@ -47,8 +47,6 @@ _PATTERN = Lark(
         | OPTION "..." -> repeated_option
         | "[" item* "]" -> optional
         | "[" item* "]" "..." -> repeated_optional
-        | "(" item* ")" -> group
-        | "(" item* ")" "..." -> repeated_group
 
     LITERAL: /[A-Za-z][\w-]*/
     PLACEHOLDER: /<[\w-]+>/
@@ -111,7 +109,7 @@ def _placeholder_rule(name: str) -> str:
 
 def _bracket_option_names(tree: Tree[Token]) -> set[str]:
     names: set[str] = set()
-    for bracket in (*tree.find_data("repeated_optional"), *tree.find_data("repeated_group")):
+    for bracket in tree.find_data("repeated_optional"):
         for option_node in bracket.find_data("option"):
             declared = _option(str(option_node.children[0]))
             assert declared is not None
@@ -172,14 +170,6 @@ class _PatternCompiler(Transformer[Token, str]):
     def repeated_optional(self, children: list[str | None]) -> str | None:
         inner = _join_fragments(children)
         return f"({inner})*" if inner else None
-
-    def group(self, children: list[str | None]) -> str | None:
-        inner = _join_fragments(children)
-        return f"({inner})" if inner else None
-
-    def repeated_group(self, children: list[str | None]) -> str | None:
-        inner = _join_fragments(children)
-        return f"({inner})+" if inner else None
 
     def line(self, children: list[str | None]) -> str:
         return _join_fragments(children[1:])  # children[0] is the leading command word, not part of argv
