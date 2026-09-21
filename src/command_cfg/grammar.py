@@ -146,22 +146,20 @@ class _PatternCompiler(Transformer[Token, str]):
         return f"{_placeholder_rule(name)}+"
 
     def option(self, children: list[Token]) -> None:
+        self._register_option(children)
+        return None  # options never appear in the joined positional grammar text
+
+    def repeated_option(self, children: list[Token]) -> None:
+        self.repeated.add(self._register_option(children))
+
+    def _register_option(self, children: list[Token]) -> str:
         declared = _option(str(children[0]))
         assert declared is not None  # the OPTION terminal only ever matches --flag-shaped text
         name, value = declared
         normalized = _normalize(name)
         self.options_by_raw_name[name] = Option(name, normalized, takes_value=value is not None)
         self.spellings.setdefault(normalized, set()).add(f"--{name}")
-        return None  # options never appear in the joined positional grammar text
-
-    def repeated_option(self, children: list[Token]) -> None:
-        declared = _option(str(children[0]))
-        assert declared is not None
-        name, value = declared
-        normalized = _normalize(name)
-        self.options_by_raw_name[name] = Option(name, normalized, takes_value=value is not None)
-        self.spellings.setdefault(normalized, set()).add(f"--{name}")
-        self.repeated.add(normalized)
+        return normalized
 
     def optional(self, children: list[str | None]) -> str | None:
         inner = _join_fragments(children)
