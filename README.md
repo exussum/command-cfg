@@ -5,7 +5,24 @@ into caller-owned objects.
 
 A config file is a sequence of command lines with shell-style quoting, `#`
 comments, and a `.` token that repeats the token in the same position on the
-line above. The grammar is one docopt-style usage pattern per line, its first word
+line above. A line indented under a command continues it, so one long command
+can be read down the page:
+
+```
+match append WIMBLEDON_FINAL
+      Alcaraz
+      6 --set 1
+```
+
+A blank line closes whatever is open, so a paragraph break is never read as a
+continuation. A comment-only line is skipped at any indentation, so commenting
+out a command's first line folds its body into the command above — the error
+then names every line of the block. A comment must be the whole line: a `#`
+after a token is an ordinary token, not a comment. Indentation is whatever
+`shlex` treats as whitespace, so a non-breaking space does not indent. A block
+is tokenized once, after its lines are joined, so a quoted value may span them.
+
+The grammar is one docopt-style usage pattern per line, its first word
 the command name; each config line is matched against its command's patterns
 and dispatched to a serializer. A malformed line raises `ConfigError`
 carrying the offending line number.
@@ -76,7 +93,6 @@ Game = namedtuple("Game", "start player sets")
 Match = namedtuple("Match", "winner sets")
 
 
-
 def champion(rows, objects):
     # There's nothing to report _but_ the winner.  No frills result.
     [row] = rows
@@ -104,9 +120,11 @@ objects = load(
     CONFIG,
     GRAMMAR,
     {
-        "setting": scalar(Settings), # Settings and Match are easily constructed by passing in the data
+        "setting": scalar(Settings),  # Settings and Match are easily constructed by passing in the data
         "match": array(Match),
-        "round": group(Round, include_key=True), # Grouping will prevent repeats off of the first entry.  including that key returns it so Round can get <name> back
+        "round": group(
+            Round, include_key=True
+        ),  # Grouping will prevent repeats off of the first entry.  including that key returns it so Round can get <name> back
         "game": each(game, default=dict),
         "champion": raw(champion),
     },

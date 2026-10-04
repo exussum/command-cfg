@@ -1,6 +1,7 @@
 """English templates for every error message; str.format fills them in."""
 
 LINE_ERROR = "line {number}: {error}"
+BLOCK_ERROR = "lines {number}-{end}: {error}"
 COMMAND_ERROR = "{command}: {error}"
 
 UNWRAPPED = "serializers must be scalar/group/array/raw/each: {commands} are unwrapped — write scalar(Settings), not Settings"

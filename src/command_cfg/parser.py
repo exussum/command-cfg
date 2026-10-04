@@ -38,6 +38,7 @@ def coerce(field_types: Mapping[str, Callable[..., Any]], values: Mapping[str, A
     return {key: cast(key, value) for key, value in values.items()}
 
 
+_WHITESPACE = shlex.shlex().whitespace
 _VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}")
 
 
@@ -56,13 +57,11 @@ def expand_variables(token: str, variables: Mapping[str, str]) -> str:
     return _VARIABLE.sub(sub, token)
 
 
-def parse_line(
-    line: str, grammars: Mapping[str, CommandGrammar], previous: Sequence[str] = (), variables: Mapping[str, str] | None = None
-) -> SimpleNamespace | None:
-    tokens = shlex.split(line, comments=True)
-    if variables is not None:
-        tokens = [expand_variables(token, variables) for token in tokens]
+def continues(line: str) -> bool:
+    return line[:1] in _WHITESPACE and bool(line.strip())
 
+
+def parse_tokens(tokens: Sequence[str], grammars: Mapping[str, CommandGrammar], previous: Sequence[str] = ()) -> SimpleNamespace | None:
     if not tokens:
         return None
     if any(token == "." and i >= len(previous) for i, token in enumerate(tokens) if i):

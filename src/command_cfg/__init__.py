@@ -1,7 +1,9 @@
 """Line-oriented config files parsed against a docopt-shaped grammar, serialized into caller-owned objects.
 
 A config file is a sequence of command lines with shell-style quoting, `#` comments,
-and a `.` token repeating the token in the same position on the line above. The
+and a `.` token repeating the token in the same position on the line above. A line
+indented under a command continues it, so one long command reads down the page; a
+blank line closes whatever is open, and a comment-only line is skipped outright. The
 grammar is one docopt-style usage pattern per line, first word the command name;
 each pattern is compiled into a Lark grammar (see `command_cfg.grammar`), and each
 config line matches its command's patterns and dispatches to a serializer. A
@@ -112,6 +114,8 @@ assert objects == {
 }
 """
 
+import re
+import shlex
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -121,7 +125,9 @@ from typing import Any
 from command_cfg import en
 from command_cfg.grammar import CommandGrammar
 from command_cfg.models import array, each, group, raw, scalar
-from command_cfg.parser import coerce, grammar_fields, grammars_by_command, parse_line
+from command_cfg.parser import coerce, continues, expand_variables, grammar_fields, grammars_by_command, parse_tokens
+
+_COMMENT = re.compile(r"\s*#")
 
 Lines = list[tuple[int, dict[str, Any]]]
 
@@ -131,11 +137,36 @@ class ConfigError(Exception):
 
 
 @contextmanager
-def exc_handler(number: int) -> Iterator[None]:
+def exc_handler(number: int, end: int | None = None) -> Iterator[None]:
     try:
         yield
     except (TypeError, ValueError) as exc:
-        raise ConfigError(en.LINE_ERROR.format(number=number, error=exc)) from None
+        template = en.LINE_ERROR if end is None or end == number else en.BLOCK_ERROR
+        raise ConfigError(template.format(number=number, end=end, error=exc)) from None
+
+
+def collapse(text: str, variables: Mapping[str, str] | None = None) -> list[tuple[int, int, list[str]]]:
+    out: list[tuple[int, int, list[str]]] = []
+    start = end = 0
+    pending: list[str] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if _COMMENT.match(line):
+            continue
+        if not line.strip():
+            if pending:
+                out.append(_tokenize(start, end, pending, variables))
+            pending = []
+        elif pending and continues(line):
+            pending.append(line)
+            end = number
+        else:
+            if pending:
+                out.append(_tokenize(start, end, pending, variables))
+            start = end = number
+            pending = [line]
+    if pending:
+        out.append(_tokenize(start, end, pending, variables))
+    return out
 
 
 class Parser:
@@ -154,12 +185,12 @@ class Parser:
         parsed_lines: defaultdict[str, Lines] = defaultdict(list)
 
         previous: list[str] = []
-        for number, line in enumerate(text.splitlines(), 1):
-            with exc_handler(number):
-                if parsed := parse_line(line, self.grammars, previous, self.variables):
+        for start, end, tokens in collapse(text, self.variables):
+            with exc_handler(start, end):
+                if parsed := parse_tokens(tokens, self.grammars, previous):
                     if parsed.command not in self.serializers:
                         raise ValueError(en.NO_SERIALIZER.format(command=parsed.command))
-                    parsed_lines[parsed.command].append((number, parsed.values))
+                    parsed_lines[parsed.command].append((start, parsed.values))
                     previous = parsed.tokens
 
         objects: dict[str, Any] = {}
@@ -261,3 +292,11 @@ def _process_each(kind: each, command: str, lines: Lines, objects: dict[str, Any
         with exc_handler(number):
             row = SimpleNamespace(**coerce(kind.types, values))
             kind.handler(objects, row)
+
+
+def _tokenize(start: int, end: int, lines: list[str], variables: Mapping[str, str] | None) -> tuple[int, int, list[str]]:
+    with exc_handler(start, end):
+        tokens = shlex.split("\n".join(lines))
+        if variables is not None:
+            tokens = [expand_variables(token, variables) for token in tokens]
+    return start, end, tokens
